@@ -1,0 +1,73 @@
+[tools]
+go = "1.27"
+lisette = { version = "latest", version_prefix = "lisette-v" }
+watchexec = "latest"
+
+# formatting/linting
+hk = "2.11.1"
+gitleaks = "latest"
+pkl = "0.32.2"
+taplo = "0.10.0"
+
+[hooks]
+postinstall = "mise run hooks:install"
+
+[tasks."hooks:install"]
+description = "Install this clone's Git hooks with the mise environment"
+run = "hk install --mise"
+
+[tasks.lint]
+description = "Check all files with hk without modifying or staging files"
+run = "hk check --all --check"
+
+[tasks.fix]
+description = "Apply hk fixes to all files without staging them"
+run = "hk fix --all --no-stage"
+
+[tasks."pre-commit"]
+description = "Run the commit hook on staged files"
+run = "hk run pre-commit"
+
+[tasks.vigilo]
+description = "Compile and run vigilo"
+alias = "default"
+raw_args = true
+sources = ["src/**/*.lis", "lisette.toml"]
+# always start the app, even when sources have not changed.
+outputs = []
+run = "lis run . --"
+
+[tasks.dev]
+description = "Rebuild and restart vigilo on source changes"
+raw = true
+quiet = true
+run = "mise watch --restart vigilo"
+
+[tasks.build]
+description = "Build the application binary"
+run = "lis build"
+
+[tasks.check]
+description = "Lint and type check the project"
+run = "lis check"
+
+[tasks.format]
+description = "Format Lisette source files"
+alias = "fmt"
+run = "lis format"
+
+[tasks."format:check"]
+description = "Check source formatting without modifying files"
+run = "lis format --check"
+
+[tasks.test]
+description = "Run the Lisette test suite"
+run = "lis test"
+
+[tasks.sync]
+description = "Reconcile dependencies with Go imports"
+run = "lis sync"
+
+[tasks.verify]
+description = "Check repository hygiene, lint, test, and build in sequence"
+run = [{ task = "lint" }, { task = "test" }, { task = "build" }]

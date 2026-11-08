@@ -1,0 +1,103 @@
+amends "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Config.pkl"
+
+import "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Builtins.pkl"
+
+exclude = List("target/**")
+
+local linters = new Mapping<String, Step> {
+  ["check-merge-conflict"] = Builtins.check_merge_conflict
+  ["detect-private-key"] = Builtins.detect_private_key
+  ["gitleaks"] = (Builtins.gitleaks) {
+    // gitleaks scans the whole tree, including files excluded by hk.
+    env {
+      ["GITLEAKS_CONFIG_TOML"] =
+        """
+        [extend]
+        useDefault = true
+
+        [[allowlists]]
+        paths = ['''(^|/)target/''']
+        """
+    }
+  }
+  ["check-added-large-files"] = Builtins.check_added_large_files
+  ["check-case-conflict"] = Builtins.check_case_conflict
+  ["check-symlinks"] = Builtins.check_symlinks
+  ["byte-order-marker"] = (Builtins.byte_order_marker) {
+    fix = null
+  }
+  ["newlines"] = (Builtins.newlines) {
+    exclude = List("**/*.lis")
+  }
+  ["trailing-whitespace"] = (Builtins.trailing_whitespace) {
+    // Lisette multiline strings preserve whitespace verbatim.
+    exclude = List("**/*.lis")
+  }
+  ["mixed-line-ending"] = (Builtins.mixed_line_ending) {
+    exclude = List("**/*.lis")
+  }
+  ["taplo-format"] = (Builtins.taplo_format) {
+    exclude = List("mise.toml")
+  }
+  ["mise"] = Builtins.mise
+  ["taplo"] = (Builtins.taplo) {
+    depends = List("taplo-format", "mise")
+  }
+  ["pkl-format"] = Builtins.pkl_format
+  ["pkl"] = (Builtins.pkl) {
+    depends = List("pkl-format")
+  }
+  ["lisette-format"] {
+    glob = List("src/**/*.lis")
+    // lis format takes one path; format the project once for any source change.
+    check = "mise run format:check"
+    fix = "mise run format"
+    stage = List("src/**/*.lis")
+    exclusive = true
+  }
+  ["lisette-check"] {
+    glob = List("src/**/*.lis", "lisette.toml", "mise.toml")
+    check = "mise run check -- --deny warnings"
+    depends = List("lisette-format", "taplo")
+    exclusive = true
+  }
+}
+
+hooks {
+  ["commit-msg"] {
+    steps {
+      ["conventional-commit"] = Builtins.check_conventional_commit
+    }
+  }
+  ["pre-commit"] {
+    fix = true
+    stage = true
+    stash = "git"
+    steps = linters
+  }
+  ["check"] {
+    fix = false
+    stage = false
+    steps = linters
+  }
+  ["fix"] {
+    fix = true
+    stage = false
+    steps = linters
+  }
+  ["pre-push"] {
+    fix = false
+    stage = false
+    steps {
+      ["test"] {
+        check = "mise run test"
+        exclusive = true
+      }
+      ["build"] {
+        check = "mise run build"
+        depends = List("test")
+        exclusive = true
+      }
+    }
+  }
+}
