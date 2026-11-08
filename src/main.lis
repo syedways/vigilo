@@ -1,5 +1,19 @@
 import "go:fmt"
+import "go:os"
+import "go:path/filepath"
+
+import "daemon"
 
 fn main() {
-  fmt.Println("Hello world!")
+  let binary_name = filepath.Base(os.Args[0])
+  let result = daemon.run(binary_name, os.Args[1..])
+
+  match result {
+    Ok(Some(help)) => fmt.Println(help),
+    Ok(None) => (),
+    Err(err) => {
+      fmt.Fprintln(os.Stderr, f"error: {err}")
+      os.Exit(1)
+    },
+  }
 }

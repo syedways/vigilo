@@ -1,0 +1,24 @@
+import "go:errors"
+
+fn config_command() -> Command {
+  Command {
+    name: "config",
+    desc: "manage config",
+    action: Action.Group([
+      Command {
+        name: "check",
+        desc: "validate config",
+        action: Action.Run { args_usage: "[path]", handler: config_check },
+      },
+    ]),
+  }
+}
+
+fn config_check(args: Slice<string>) -> Result<(), error> {
+  let _path = match args {
+    [] => "vigilo.toml",
+    [path] => path,
+    _ => return Err(errors.New("expected at most one path")),
+  }
+  Err(errors.New("config validation is not implemented"))
+}

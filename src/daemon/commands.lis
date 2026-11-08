@@ -1,0 +1,79 @@
+import "go:errors"
+import "go:strings"
+
+struct Command { name: string, desc: string, action: Action }
+
+enum Action {
+  Run { args_usage: string, handler: fn(Slice<string>) -> Result<(), error> },
+  Group(Slice<Command>),
+}
+
+fn root_commands() -> Slice<Command> {
+  [config_command()]
+}
+
+pub fn run(
+  binary_name: string,
+  args: Slice<string>,
+) -> Result<Option<string>, error> {
+  dispatch(root_commands(), binary_name, args)
+}
+
+fn dispatch(
+  commands: Slice<Command>,
+  parent_path: string,
+  args: Slice<string>,
+) -> Result<Option<string>, error> {
+  let (name, command_args) = match args {
+    [] | ["--help"] => return Ok(Some(group_help(commands, parent_path))),
+    [name, ..rest] => (name, rest),
+  }
+
+  let Some(command) = commands.find(|entry| entry.name == name) else {
+    return Err(errors.New(f"{parent_path}: unknown command: {name}"))
+  }
+  let command_path = f"{parent_path} {name}"
+
+  match command.action {
+    Action.Group(children) => dispatch(children, command_path, command_args),
+    Action.Run { args_usage, handler } => {
+      if let ["--help"] = command_args {
+        let syntax = command_syntax(command_path, args_usage)
+        return Ok(Some(f"Usage: {syntax}\n\n{command.desc}"))
+      }
+      handler(command_args).wrap_err(command_path)?
+      Ok(None)
+    },
+  }
+}
+
+fn command_syntax(path: string, args_usage: string) -> string {
+  strings.TrimSpace(f"{path} {args_usage}")
+}
+
+fn group_help(commands: Slice<Command>, path: string) -> string {
+  let rows = command_rows(commands, "  ")
+  f"Usage: {path} <command> [args]\n\nCommands:\n{rows}"
+}
+
+fn command_rows(commands: Slice<Command>, indent: string) -> string {
+  let rows = commands.map(|command| command_row(command, indent))
+  strings.Join(rows, "\n")
+}
+
+fn command_row(command: Command, indent: string) -> string {
+  match command.action {
+    Action.Group(children) => {
+      let syntax = command_syntax(command.name, "<command> [args]")
+      let row = f"{indent}{syntax}: {command.desc}"
+      if children.is_empty() { return row }
+
+      let child_rows = command_rows(children, f"{indent}  ")
+      f"{row}\n{child_rows}"
+    },
+    Action.Run { args_usage, .. } => {
+      let syntax = command_syntax(command.name, args_usage)
+      f"{indent}{syntax}: {command.desc}"
+    },
+  }
+}
