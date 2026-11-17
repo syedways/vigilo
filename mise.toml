@@ -1,6 +1,6 @@
 [tools]
 go = "1.27"
-lisette = { version = "latest", version_prefix = "lisette-v" }
+lisette = { version = "0.13.1", version_prefix = "lisette-v" }
 watchexec = "latest"
 
 # formatting/linting

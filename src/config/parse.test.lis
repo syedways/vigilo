@@ -1,0 +1,186 @@
+import "go:os"
+import "go:path/filepath"
+import "go:strings"
+
+import "server"
+
+fn minimal_serve() -> string {
+  "role = \"serve\"\n[admin]\nusername = \"admin\"\npassword_file = \"/missing/password\"\n"
+}
+
+#[test]
+fn serve_defaults_and_secret_source() {
+  let assert Ok(Config.Serve(settings)) = parse(minimal_serve().bytes())
+  assert settings.listen == "127.0.0.1:8080"
+  assert settings.storage_path == "/var/lib/vigilo/vigilo.db"
+  assert settings.admin_username == "admin"
+  assert settings.password == server.SecretSource.File("/missing/password")
+}
+
+#[test]
+fn full_serve_config() {
+  let contents = "role = \"serve\"
+[server]
+listen = \"[::1]:9000\"
+[storage]
+path = \"/srv/vigilo/state.db\"
+[admin]
+username = \"operator\"
+password_credential = \"admin-password.1\"
+"
+  let assert Ok(Config.Serve(settings)) = parse(contents.bytes())
+  assert settings.listen == "[::1]:9000"
+  assert settings.storage_path == "/srv/vigilo/state.db"
+  assert settings.admin_username == "operator"
+  assert settings.password == server.SecretSource.Credential("admin-password.1")
+}
+
+#[test]
+fn minimal_agent_config() {
+  let assert Ok(Config.Agent(settings)) = parse(
+    "role = \"agent\"\n[machine]\nname = \"web-01\"\n".bytes(),
+  )
+  assert settings.machine_name == "web-01"
+}
+
+#[test]
+fn rejects_missing_invalid_and_mistyped_roles() {
+  for contents in [
+    "",
+    "role = \"\"",
+    "role = \"server\"",
+    "role = 1",
+    "role = [\"agent\"]",
+  ] {
+    let assert Err(err) = parse(contents.bytes())
+    assert err.Error().contains("role")
+  }
+  assert parse("role =".bytes()).is_err()
+  assert parse("role = \"agent\"\nrole = \"serve\"".bytes()).is_err()
+}
+
+#[test]
+fn rejects_unknown_and_other_role_fields() {
+  for contents in [
+    f"unknown = true\n{minimal_serve()}",
+    f"{minimal_serve()}unknown = true\n",
+    f"{minimal_serve()}[machine]\nname = \"web\"\n",
+    f"{minimal_serve()}[unused]\n",
+    "role = \"agent\"\n[machine]\nname = \"web\"\nunknown = true\n",
+    "role = \"agent\"\n[machine]\nname = \"web\"\n[server]\nlisten = \"localhost:9000\"\n",
+    "role = \"agent\"\n[machine]\nname = \"web\"\n[admin]\n",
+  ] {
+    let assert Err(err) = parse(contents.bytes())
+    assert err.Error().contains("decode")
+  }
+}
+
+#[test]
+fn config_errors_do_not_echo_unknown_literal_secrets() {
+  for (literal, secret) in [
+    ("\"test-secret-must-stay-private\"", "test-secret-must-stay-private"),
+    ("123456789123456789123456789", "123456789123456789123456789"),
+    ("0xffffffffffffffffffffffff", "ffffffffffffffffffffffff"),
+    ("1.23456789123456789e9999", "1.23456789123456789e9999"),
+    ("test-secret-must-stay-private", "test-secret-must-stay-private"),
+  ] {
+    let contents = f"{minimal_serve()}password = {literal}\n"
+    let assert Err(err) = parse(contents.bytes())
+    assert !err.Error().contains(secret)
+    assert !err.Error().contains("password =")
+  }
+}
+
+#[test]
+fn rejects_mixed_case_keys_and_aliases() {
+  for contents in [
+    f"{minimal_serve()}Password_Credential = \"admin-password\"\n",
+    f"{minimal_serve()}Password_File = \"/different/password\"\n",
+    strings.ReplaceAll(minimal_serve(), "password_file", "Password_File"),
+    strings.ReplaceAll(minimal_serve(), "[admin]", "[Admin]"),
+    f"{minimal_serve()}[Admin]\npassword_credential = \"admin-password\"\n",
+    f"Role = \"agent\"\n{minimal_serve()}",
+    f"{minimal_serve()}[server]\nlisten = \"127.0.0.1:8080\"\nListen = \"0.0.0.0:8080\"\n",
+    "role = \"serve\"\nadmin = { username = \"admin\", password_file = \"/missing/password\", Password_Credential = \"admin-password\" }\n",
+    "role = \"agent\"\n[machine]\nname = \"web-01\"\nName = \"web-02\"\n",
+    "role = \"agent\"\n[Machine]\nname = \"web-01\"\n",
+  ] {
+    assert parse(contents.bytes()).is_err()
+  }
+}
+
+#[test]
+fn decode_errors_keep_safe_context() {
+  let assert Err(syntax_err) = parse("role =".bytes())
+  assert syntax_err.Error().contains("decode TOML")
+  assert syntax_err.Error().contains("line 1, column")
+  let assert Err(type_err) = parse(
+    "role = \"agent\"\n[machine]\nname = 1\n".bytes(),
+  )
+  assert type_err.Error().contains("decode agent config")
+  assert type_err.Error().contains("invalid TOML")
+  assert type_err.Error().contains("line 3, column")
+  let assert Err(field_err) = parse(
+    f"{minimal_serve()}unknown = true\n".bytes(),
+  )
+  assert field_err.Error().contains("unknown config field")
+}
+
+#[test]
+fn rejects_missing_and_invalid_values() {
+  for contents in [
+    "role = \"serve\"",
+    "role = \"agent\"",
+    "role = \"agent\"\n[machine]\nname = \"  \"\n",
+    "role = \"agent\"\n[machine]\nname = 1\n",
+    strings.ReplaceAll(
+      minimal_serve(),
+      "username = \"admin\"",
+      "username = \"\"",
+    ),
+    strings.ReplaceAll(
+      minimal_serve(),
+      "/missing/password",
+      "relative/password",
+    ),
+    f"{minimal_serve()}[storage]\npath = \"relative.db\"\n",
+    f"{minimal_serve()}[storage]\npath = \"\"\n",
+  ] {
+    assert parse(contents.bytes()).is_err()
+  }
+}
+
+#[test]
+fn requires_exactly_one_nonempty_secret_selector() {
+  for contents in [
+    "role = \"serve\"\n[admin]\nusername = \"admin\"\n",
+    f"{minimal_serve()}password_credential = \"admin-password\"\n",
+    f"{minimal_serve()}password_credential = \"\"\n",
+    strings.ReplaceAll(minimal_serve(), "/missing/password", ""),
+    strings.ReplaceAll(
+      minimal_serve(),
+      "password_file = \"/missing/password\"",
+      "password_credential = \"\"",
+    ),
+  ] {
+    assert parse(contents.bytes()).is_err()
+  }
+}
+
+#[test]
+fn loading_config_never_reads_secrets_or_creates_state() -> Result<(), error> {
+  let dir = os.MkdirTemp("", "vigilo-config-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let config_path = filepath.Join(dir, "serve.toml")
+  let storage_path = filepath.Join(dir, "missing", "state.db")
+  let contents = f"{minimal_serve()}[storage]\npath = \"{storage_path}\"\n"
+  os.WriteFile(config_path, contents.bytes(), 0o600)?
+  let assert Config.Serve(_) = load(config_path)?
+  assert os.Stat(filepath.Join(dir, "missing")).is_err()
+  let preserved_contents = os.ReadFile(config_path)? as string
+  assert preserved_contents == contents
+  assert load(filepath.Join(dir, "missing.toml")).is_err()
+  Ok(())
+}

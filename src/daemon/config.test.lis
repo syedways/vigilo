@@ -1,0 +1,51 @@
+import "go:os"
+
+import "config"
+
+#[test]
+fn config_check_path_precedence() -> Result<(), error> {
+  let dir = os.MkdirTemp("", "vigilo-config-check-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let cwd = os.Getwd()?
+  os.Chdir(dir)?
+  defer {
+    let _ = os.Chdir(cwd)
+  }
+
+  let key = "VIGILO_CONFIG_PATH"
+  let original = os.LookupEnv(key)
+  defer {
+    let _ = match original {
+      Some(value) => os.Setenv(key, value),
+      None => os.Unsetenv(key),
+    }
+  }
+
+  let valid = "role = \"agent\"\n[machine]\nname = \"dev\"\n".bytes()
+  os.WriteFile("explicit.toml", valid, 0o600)?
+  let args = ["config", "check"]
+
+  os.Unsetenv(key)?
+  assert config.default_path() == "/etc/vigilo/vigilo.toml"
+  os.Setenv(key, "")?
+  assert config.default_path() == "/etc/vigilo/vigilo.toml"
+
+  os.Setenv(key, "override.toml")?
+  let assert Err(err) = run("vigilo", args)
+  assert err.Error().contains("override.toml")
+  let assert Ok(None) = run("vigilo", args.append("explicit.toml"))
+
+  os.WriteFile("override.toml", valid, 0o600)?
+  let assert Ok(None) = run("vigilo", args)
+  Ok(())
+}
+
+#[test]
+fn config_check_help_lists_path_sources() {
+  let assert Ok(Some(help)) = run("vigilo", ["config", "check", "--help"])
+  assert help.contains(
+    "[path], then VIGILO_CONFIG_PATH, then /etc/vigilo/vigilo.toml",
+  )
+}

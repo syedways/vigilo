@@ -1,0 +1,159 @@
+import "go:bytes"
+import "go:errors"
+import "go:github.com/pelletier/go-toml/v2"
+import "go:path/filepath"
+import "go:strings"
+
+import "agent"
+import "server"
+
+pub enum Config {
+  Serve(server.Config),
+  Agent(agent.Config),
+}
+
+#[toml]
+struct ServerInput {
+  role: string,
+  server: ListenInput,
+  storage: StorageInput,
+  admin: AdminInput,
+}
+
+#[toml]
+struct ListenInput { listen: string }
+
+#[toml]
+struct StorageInput { path: string }
+
+#[toml]
+struct AdminInput {
+  username: string,
+  password_file: string,
+  password_credential: string,
+}
+
+#[toml]
+struct AgentInput { role: string, machine: MachineInput }
+
+#[toml]
+struct MachineInput { name: string }
+
+fn parse(contents: Slice<byte>) -> Result<Config, error> {
+  // keep exact key spelling and distinguish missing password selectors from empty ones.
+  let mut fields = Map.new<string, Unknown>()
+  toml
+    .Unmarshal(contents, &fields)
+    .map_err(decode_error)
+    .wrap_err("decode TOML")?
+  validate_keys(fields).wrap_err("decode config")?
+  let Some(role_value) = fields.get("role") else {
+    return Err(errors.New("role is required"))
+  }
+  let Some(role) = assert_type<string>(role_value) else {
+    return Err(errors.New("role must be a string"))
+  }
+  match role {
+    "serve" => parse_server(contents, fields),
+    "agent" => parse_agent(contents),
+    _ => Err(errors.New("role must be serve or agent")),
+  }
+}
+
+fn decode_error(err: error) -> error {
+  if let Some(failure) = assert_type<Ref<toml.DecodeError>>(err) {
+    let (line, column) = failure.Position()
+    return errors.New(f"invalid TOML at line {line}, column {column}")
+  }
+  if assert_type<Ref<toml.StrictMissingError>>(err).is_some() {
+    return errors.New("unknown config field")
+  }
+  errors.New("invalid TOML value")
+}
+
+fn validate_keys(fields: Map<string, Unknown>) -> Result<(), error> {
+  for (key, value) in fields {
+    if key != strings.ToLower(key) {
+      return Err(errors.New("config keys must be lowercase"))
+    }
+    if let Some(table) = assert_type<Map<string, Unknown>>(value) {
+      validate_keys(table)?
+    }
+  }
+  Ok(())
+}
+
+fn parse_server(
+  contents: Slice<byte>,
+  fields: Map<string, Unknown>,
+) -> Result<Config, error> {
+  let mut input = ServerInput {
+    server: ListenInput { listen: "127.0.0.1:8080" },
+    storage: StorageInput { path: "/var/lib/vigilo/vigilo.db" },
+    ..,
+  }
+  decode_role(contents, &input).wrap_err("decode serve config")?
+  server.validate_listen(input.server.listen)?
+  let storage_path = input.storage.path
+  if !filepath.IsAbs(storage_path) || strings.ContainsRune(storage_path, '\0') {
+    return Err(errors.New("storage.path must be an absolute path without NUL"))
+  }
+  let password = select_password(input.admin, fields)?
+  validate_name(input.admin.username, "admin.username")?
+  Ok(Config.Serve(
+    server.Config {
+      listen: input.server.listen,
+      storage_path,
+      admin_username: input.admin.username,
+      password,
+    },
+  ))
+}
+
+fn parse_agent(contents: Slice<byte>) -> Result<Config, error> {
+  let mut input = AgentInput { .. }
+  decode_role(contents, &input).wrap_err("decode agent config")?
+  validate_name(input.machine.name, "machine.name")?
+  Ok(Config.Agent(agent.Config { machine_name: input.machine.name }))
+}
+
+fn decode_role<T>(contents: Slice<byte>, input: mut Ref<T>) -> Result<(), error> {
+  let mut decoder = toml.NewDecoder(bytes.NewReader(contents))
+  decoder.DisallowUnknownFields()
+  decoder.Decode(input).map_err(decode_error)
+}
+
+fn select_password(
+  admin: AdminInput,
+  fields: Map<string, Unknown>,
+) -> Result<server.SecretSource, error> {
+  let Some(admin_value) = fields.get("admin") else {
+    return Err(errors.New("admin settings are required"))
+  }
+  let Some(admin_fields) = assert_type<Map<string, Unknown>>(admin_value) else {
+    return Err(errors.New("admin must be a table"))
+  }
+  let password = match (
+    admin_fields.get("password_file"),
+    admin_fields.get("password_credential"),
+  ) {
+    (Some(_), None) => server.SecretSource.File(admin.password_file),
+    (None, Some(_)) => server.SecretSource.Credential(admin.password_credential),
+    (None, None) | (Some(_), Some(_)) => {
+      return Err(errors.New(
+        "admin requires exactly one of password_file or password_credential",
+      ))
+    },
+  }
+  server.validate_password_source(password)?
+  Ok(password)
+}
+
+fn validate_name(name: string, field: string) -> Result<(), error> {
+  if strings.TrimSpace(name).is_empty() || strings.ContainsAny(name, "\r\n\0") {
+    return Err(errors.New(
+      f"{field} must be nonempty and contain no newline or NUL",
+    ))
+  }
+  Ok(())
+}

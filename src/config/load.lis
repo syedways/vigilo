@@ -1,0 +1,13 @@
+import "go:os"
+
+pub const SYSTEM_CONFIG_PATH = "/etc/vigilo/vigilo.toml"
+
+pub fn default_path() -> string {
+  let path = os.Getenv("VIGILO_CONFIG_PATH")
+  if path.is_empty() { SYSTEM_CONFIG_PATH } else { path }
+}
+
+pub fn load(path: string) -> Result<Config, error> {
+  let contents = os.ReadFile(path).wrap_err("read config")?
+  parse(contents).wrap_err("validate config")
+}

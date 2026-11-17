@@ -1,0 +1,29 @@
+#[test]
+fn validates_listen_without_resolving_hosts() {
+  for address in [
+    "127.0.0.1:0",
+    "localhost:8080",
+    ":8080",
+    "[::1]:65535",
+    "[fe80::1%eth0]:8080",
+    "[::ffff:192.0.2.1]:8080",
+  ] {
+    assert validate_listen(address).is_ok()
+  }
+  for address in [
+    "",
+    "localhost",
+    "localhost:",
+    "::1:8080",
+    "[gg::1]:8080",
+    "[fe80::1%]:8080",
+    "[fe80::1%eth0%eth1]:8080",
+    "localhost:http",
+    "localhost:-1",
+    "localhost:+80",
+    "localhost:65536",
+    "bad host:8080",
+  ] {
+    assert validate_listen(address).is_err()
+  }
+}

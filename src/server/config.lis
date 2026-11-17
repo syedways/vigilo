@@ -1,0 +1,29 @@
+import "go:errors"
+import "go:net"
+import "go:net/netip"
+import "go:strconv"
+import "go:strings"
+
+pub struct Config {
+  pub listen: string,
+  pub storage_path: string,
+  pub admin_username: string,
+  pub password: SecretSource,
+}
+
+pub fn validate_listen(address: string) -> Result<(), error> {
+  let (host, port_text) = net
+    .SplitHostPort(address)
+    .wrap_err("server.listen must be host:port")?
+  if strings.ContainsAny(host, " \t\r\n/\0") {
+    return Err(errors.New("server.listen has an invalid host"))
+  }
+  if host.contains(":") && (strings.Count(host, "%") > 1 ||
+  netip.ParseAddr(host).is_err()) {
+    return Err(errors.New("server.listen has an invalid IPv6 address"))
+  }
+  let _ = strconv
+    .ParseUint(port_text, 10, 16)
+    .wrap_err("server.listen requires a decimal port from 0 to 65535")?
+  Ok(())
+}
