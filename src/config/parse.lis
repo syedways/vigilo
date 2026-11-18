@@ -8,7 +8,7 @@ import "agent"
 import "server"
 
 pub enum Config {
-  Serve(server.Config),
+  Server(server.Config),
   Agent(agent.Config),
 }
 
@@ -54,9 +54,9 @@ fn parse(contents: Slice<byte>) -> Result<Config, error> {
     return Err(errors.New("role must be a string"))
   }
   match role {
-    "serve" => parse_server(contents, fields),
+    "server" => parse_server(contents, fields),
     "agent" => parse_agent(contents),
-    _ => Err(errors.New("role must be serve or agent")),
+    _ => Err(errors.New("role must be server or agent")),
   }
 }
 
@@ -92,7 +92,7 @@ fn parse_server(
     storage: StorageInput { path: "/var/lib/vigilo/vigilo.db" },
     ..,
   }
-  decode_role(contents, &input).wrap_err("decode serve config")?
+  decode_role(contents, &input).wrap_err("decode server config")?
   server.validate_listen(input.server.listen)?
   let storage_path = input.storage.path
   if !filepath.IsAbs(storage_path) || strings.ContainsRune(storage_path, '\0') {
@@ -100,7 +100,7 @@ fn parse_server(
   }
   let password = select_password(input.admin, fields)?
   validate_name(input.admin.username, "admin.username")?
-  Ok(Config.Serve(
+  Ok(Config.Server(
     server.Config {
       listen: input.server.listen,
       storage_path,
