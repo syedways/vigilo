@@ -7,13 +7,24 @@ import "go:strings"
 import "agent"
 import "server"
 
+const DEFAULT_LISTEN = "127.0.0.1:8080"
+
+const DEFAULT_STORAGE_PATH = "/var/lib/vigilo/vigilo.db"
+
 pub enum Config {
   Server(server.Config),
   Agent(agent.Config),
+  Both { server: server.Config, agent: agent.Config },
 }
 
 #[toml]
-struct ServerInput {
+struct SectionsInput { server: ServerInput, agent: MachineInput }
+
+#[toml]
+struct ServerInput { listen: string, storage: StorageInput, admin: AdminInput }
+
+#[toml]
+struct RoleServerInput {
   role: string,
   server: ListenInput,
   storage: StorageInput,
@@ -34,7 +45,7 @@ struct AdminInput {
 }
 
 #[toml]
-struct AgentInput { role: string, machine: MachineInput }
+struct RoleAgentInput { role: string, machine: MachineInput }
 
 #[toml]
 struct MachineInput { name: string }
@@ -48,14 +59,14 @@ fn parse(contents: Slice<byte>) -> Result<Config, error> {
     .wrap_err("decode TOML")?
   validate_keys(fields).wrap_err("decode config")?
   let Some(role_value) = fields.get("role") else {
-    return Err(errors.New("role is required"))
+    return parse_sections(contents, fields)
   }
   let Some(role) = assert_type<string>(role_value) else {
     return Err(errors.New("role must be a string"))
   }
   match role {
-    "server" => parse_server(contents, fields),
-    "agent" => parse_agent(contents),
+    "server" => parse_role_server(contents, fields),
+    "agent" => parse_role_agent(contents),
     _ => Err(errors.New("role must be server or agent")),
   }
 }
@@ -83,41 +94,103 @@ fn validate_keys(fields: Map<string, Unknown>) -> Result<(), error> {
   Ok(())
 }
 
-fn parse_server(
+fn parse_sections(
   contents: Slice<byte>,
   fields: Map<string, Unknown>,
 ) -> Result<Config, error> {
-  let mut input = ServerInput {
-    server: ListenInput { listen: "127.0.0.1:8080" },
-    storage: StorageInput { path: "/var/lib/vigilo/vigilo.db" },
+  let mut input = SectionsInput {
+    server: ServerInput {
+      listen: DEFAULT_LISTEN,
+      storage: StorageInput { path: DEFAULT_STORAGE_PATH },
+      ..,
+    },
     ..,
   }
-  decode_role(contents, &input).wrap_err("decode server config")?
-  server.validate_listen(input.server.listen)?
+  decode_config(contents, &input).wrap_err("decode config sections")?
+  let server_settings = match fields.get("server") {
+    Some(value) => {
+      let Some(table) = assert_type<Map<string, Unknown>>(value) else {
+        return Err(errors.New("server must be a table"))
+      }
+      Some(validate_server(input.server, table).wrap_err("server config")?)
+    },
+    None => None,
+  }
+  let agent_settings = if fields.get("agent").is_some() {
+    Some(validate_agent(input.agent, "agent.name")?)
+  } else {
+    None
+  }
+  match (server_settings, agent_settings) {
+    (Some(server_config), Some(agent_config)) => Ok(
+      Config.Both { server: server_config, agent: agent_config },
+    ),
+    (Some(settings), None) => Ok(Config.Server(settings)),
+    (None, Some(settings)) => Ok(Config.Agent(settings)),
+    (None, None) => Err(errors.New("config requires a server or agent section")),
+  }
+}
+
+fn parse_role_server(
+  contents: Slice<byte>,
+  fields: Map<string, Unknown>,
+) -> Result<Config, error> {
+  let mut input = RoleServerInput {
+    server: ListenInput { listen: DEFAULT_LISTEN },
+    storage: StorageInput { path: DEFAULT_STORAGE_PATH },
+    ..,
+  }
+  decode_config(contents, &input).wrap_err("decode server config")?
+  let settings = validate_server(
+    ServerInput {
+      listen: input.server.listen,
+      storage: input.storage,
+      admin: input.admin,
+    },
+    fields,
+  )?
+  Ok(Config.Server(settings))
+}
+
+fn validate_server(
+  input: ServerInput,
+  fields: Map<string, Unknown>,
+) -> Result<server.Config, error> {
+  server.validate_listen(input.listen)?
   let storage_path = input.storage.path
   if !filepath.IsAbs(storage_path) || strings.ContainsRune(storage_path, '\0') {
     return Err(errors.New("storage.path must be an absolute path without NUL"))
   }
   let password = select_password(input.admin, fields)?
   validate_name(input.admin.username, "admin.username")?
-  Ok(Config.Server(
+  Ok(
     server.Config {
-      listen: input.server.listen,
+      listen: input.listen,
       storage_path,
       admin_username: input.admin.username,
       password,
     },
-  ))
+  )
 }
 
-fn parse_agent(contents: Slice<byte>) -> Result<Config, error> {
-  let mut input = AgentInput { .. }
-  decode_role(contents, &input).wrap_err("decode agent config")?
-  validate_name(input.machine.name, "machine.name")?
-  Ok(Config.Agent(agent.Config { machine_name: input.machine.name }))
+fn parse_role_agent(contents: Slice<byte>) -> Result<Config, error> {
+  let mut input = RoleAgentInput { .. }
+  decode_config(contents, &input).wrap_err("decode agent config")?
+  Ok(Config.Agent(validate_agent(input.machine, "machine.name")?))
 }
 
-fn decode_role<T>(contents: Slice<byte>, input: mut Ref<T>) -> Result<(), error> {
+fn validate_agent(
+  input: MachineInput,
+  name_field: string,
+) -> Result<agent.Config, error> {
+  validate_name(input.name, name_field)?
+  Ok(agent.Config { machine_name: input.name })
+}
+
+fn decode_config<T>(
+  contents: Slice<byte>,
+  input: mut Ref<T>,
+) -> Result<(), error> {
   let mut decoder = toml.NewDecoder(bytes.NewReader(contents))
   decoder.DisallowUnknownFields()
   decoder.Decode(input).map_err(decode_error)

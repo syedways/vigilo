@@ -44,9 +44,49 @@ fn minimal_agent_config() {
 }
 
 #[test]
-fn rejects_missing_invalid_and_mistyped_roles() {
+fn config_sections_support_one_or_both_roles() {
+  let server_section = "[server.admin]\nusername = \"admin\"\npassword_credential = \"admin-password\"\n"
+  let agent_section = "[agent]\nname = \"web-01\"\n"
+  let assert Ok(Config.Server(server_only)) = parse(server_section.bytes())
+  let assert Ok(Config.Agent(agent_only)) = parse(agent_section.bytes())
+  let assert Ok(Config.Both { server: shared_server, agent: shared_agent }) = parse(
+    f"[server]\nlisten = \"[::1]:9000\"\n{server_section}[server.storage]\npath = \"/srv/vigilo/state.db\"\n{agent_section}".bytes(),
+  )
+  assert server_only.listen == "127.0.0.1:8080"
+  assert server_only.storage_path == "/var/lib/vigilo/vigilo.db"
+  assert shared_server.listen == "[::1]:9000"
+  assert shared_server.storage_path == "/srv/vigilo/state.db"
+  assert shared_server.admin_username == "admin"
+  assert shared_server.password ==
+  server.SecretSource.Credential("admin-password")
+  assert agent_only.machine_name == "web-01"
+  assert shared_agent.machine_name == agent_only.machine_name
+}
+
+#[test]
+fn shared_configs_reject_invalid_sections_and_mixed_formats() {
+  let server_section = "[server.admin]\nusername = \"admin\"\npassword_file = \"/missing/password\"\n"
+  let agent_section = "[agent]\nname = \"web-01\"\n"
   for contents in [
-    "",
+    f"{server_section}[agent]\n",
+    f"[server]\n{agent_section}",
+    f"[server]\nlisten = \"bad\"\n{server_section}{agent_section}",
+    f"{server_section}password_credential = \"\"\n{agent_section}",
+    f"{server_section}{agent_section}Name = \"alias\"\n",
+    f"{server_section}{agent_section}unknown = true\n",
+    f"role = \"agent\"\n[machine]\nname = \"legacy\"\n{agent_section}",
+    "agent = []",
+    "server = true",
+  ] {
+    assert parse(contents.bytes()).is_err()
+  }
+}
+
+#[test]
+fn rejects_missing_invalid_and_mistyped_roles() {
+  let assert Err(missing) = parse("".bytes())
+  assert missing.Error().contains("config requires a server or agent section")
+  for contents in [
     "role = \"\"",
     "role = \"serve\"",
     "role = 1",
