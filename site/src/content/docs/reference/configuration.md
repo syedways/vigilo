@@ -1,5 +1,5 @@
 ---
-title: Configure
+title: Configuration
 description: Write and validate a Vigilo configuration file.
 ---
 
