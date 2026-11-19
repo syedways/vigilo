@@ -1,0 +1,25 @@
+header .site-title {
+  gap: 0.5rem;
+}
+
+header .site-title img {
+  height: 2rem;
+}
+
+@media screen and (min-width: 50rem) {
+  header > .header {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+}
+
+@media screen and (width < 50rem) {
+  header > .header > .right-group {
+    display: flex;
+    margin-inline-start: auto;
+  }
+
+  :root[data-has-sidebar] header > .header > .right-group starlight-theme-select,
+  :root[data-has-sidebar] header > .header > .right-group .social-icons::after {
+    display: none;
+  }
+}

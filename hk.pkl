@@ -44,6 +44,7 @@ local linters = new Mapping<String, Step> {
     depends = List("taplo-format", "mise")
   }
   ["pkl-format"] = Builtins.pkl_format
+  ["jactionlint"] = Builtins.jactionlint
   ["pkl"] = (Builtins.pkl) {
     depends = List("pkl-format")
   }

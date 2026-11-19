@@ -1,10 +1,13 @@
 [tools]
 go = "1.27"
+node = "26.13.0"
+aube = "2.10.1"
 lisette = { version = "0.13.1", version_prefix = "lisette-v" }
 watchexec = "latest"
 
 # formatting/linting
 hk = "2.11.1"
+jactionlint = "2.6.0"
 gitleaks = "latest"
 pkl = "0.32.2"
 taplo = "0.10.0"
@@ -71,3 +74,18 @@ run = "lis sync"
 [tasks.verify]
 description = "Check repository hygiene, lint, test, and build in sequence"
 run = [{ task = "lint" }, { task = "test" }, { task = "build" }]
+
+[tasks.docs]
+description = "Run a docs package script"
+dir = "site"
+run = '''
+#!/bin/sh
+script=${1:?usage: mise run docs <script> [args...]}
+shift
+exec aube run --no-install "$script" -- "$@"
+'''
+
+[tasks."docs:install"]
+description = "Install docs dependencies from the lockfile"
+dir = "site"
+run = "aube ci --ignore-scripts --disable-global-virtual-store"

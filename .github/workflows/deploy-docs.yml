@@ -1,0 +1,111 @@
+name: Deploy docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - mise.toml
+      - mise.lock
+      - .github/workflows/deploy-docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: deploy-docs-${{ github.ref }}
+
+env:
+  MISE_ENABLE_TOOLS: node,aube
+  MISE_LOCKED: "1"
+  MISE_NO_HOOKS: "1"
+
+jobs:
+  build:
+    name: Build docs
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache mise downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/mise/downloads-cas
+          key: mise-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock') }}
+
+      - name: Set up mise
+        uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
+        with:
+          version: "2026.11.0"
+          cache: false
+
+      - name: Install dependencies
+        run: mise run docs:install
+
+      - name: Build the site
+        run: mise run docs build
+        env:
+          ASTRO_TELEMETRY_DISABLED: "1"
+
+      - name: Upload static assets
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-${{ github.run_attempt }}
+          path: site/dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: Deploy docs to Cloudflare
+    needs: build
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    environment: docs-production
+    defaults:
+      run:
+        working-directory: site/deploy
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache mise downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/mise/downloads-cas
+          key: mise-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock') }}
+
+      - name: Set up mise
+        uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
+        with:
+          version: "2026.11.0"
+          cache: false
+
+      - name: Install Wrangler
+        run: mise exec -- aube ci --ignore-scripts
+
+      - name: Download static assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: site/dist/
+
+      - name: Deploy to Cloudflare Workers
+        run: mise exec -- aube run --no-install deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

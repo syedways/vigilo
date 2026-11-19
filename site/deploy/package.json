@@ -1,0 +1,12 @@
+{
+  "name": "vigilo-docs-deploy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "preview": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "wrangler": "4.164.0"
+  }
+}

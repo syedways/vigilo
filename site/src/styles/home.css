@@ -1,0 +1,55 @@
+.page:has(.vigilo-name) {
+  --vigilo-green: #70eca1;
+  --vigilo-wash: #263750;
+  --vigilo-tint: #1a2726;
+  background:
+    radial-gradient(ellipse at 78% 26%, var(--vigilo-wash), transparent 62%),
+    linear-gradient(155deg, var(--vigilo-tint), var(--sl-color-bg) 74%);
+}
+
+:root[data-theme="light"] .page:has(.vigilo-name) {
+  --vigilo-green: #18703e;
+  --vigilo-wash: #e3edf9;
+  --vigilo-tint: #eff7f3;
+}
+
+.vigilo-name,
+.vigilo-headline {
+  display: block;
+  letter-spacing: -0.04em;
+}
+
+.vigilo-name {
+  margin-block-end: 0.875rem;
+  color: var(--vigilo-green);
+  font-size: clamp(3.75rem, 9vw, 7rem);
+  line-height: 0.95;
+}
+
+.vigilo-headline {
+  font-size: clamp(2rem, 4.5vw, 3.625rem);
+  line-height: 1.05;
+  text-wrap: balance;
+}
+
+.hero:has(.vigilo-name) .tagline {
+  max-inline-size: 34ch;
+}
+
+.hero:has(.vigilo-name) > .hero-html {
+  display: grid;
+  place-items: center;
+  width: min(75%, 15rem);
+  aspect-ratio: 1;
+}
+
+.hero:has(.vigilo-name) > .hero-html img {
+  width: 84%;
+  height: auto;
+}
+
+@media (min-width: 50rem) {
+  .hero:has(.vigilo-name) > .hero-html {
+    width: min(100%, 24rem);
+  }
+}
