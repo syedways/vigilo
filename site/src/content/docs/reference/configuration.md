@@ -1,14 +1,20 @@
 ---
 title: Configuration
-description: Write and validate a Vigilo configuration file.
+description: TOML examples, validation, and accepted values for each setting.
+tableOfContents:
+  maxHeadingLevel: 4
 ---
 
-## Create a config
+## Choose a setup
 
-Copy the example that fits your setup into `/etc/vigilo/vigilo.toml`. Use
-lowercase keys. Existing files with a top-level `role` still work.
+Copy one of the examples into `/etc/vigilo/vigilo.toml`. Use lowercase keys.
 
-### Server with a password file
+### Server only
+
+Set the admin password using one of the options below. Both use the default
+listen address and database path.
+
+#### Password file
 
 ```toml title="/etc/vigilo/vigilo.toml"
 [server.admin]
@@ -17,9 +23,26 @@ password_file = "/run/secrets/vigilo-admin"
 ```
 
 Save the password to `/run/secrets/vigilo-admin` and give the server read access.
-The listen address and database path use the defaults below.
 
-### Agent
+#### systemd credential
+
+```toml title="/etc/vigilo/vigilo.toml"
+[server.admin]
+username = "admin"
+password_credential = "admin-password"
+```
+
+Save the password to `/run/secrets/vigilo-admin` and add this drop-in to the
+systemd service that runs the server.
+
+```ini
+[Service]
+LoadCredential=admin-password:/run/secrets/vigilo-admin
+```
+
+The credential name `admin-password` matches `password_credential` in the TOML.
+
+### Agent only
 
 ```toml title="/etc/vigilo/vigilo.toml"
 [agent]
@@ -43,9 +66,9 @@ password_credential = "admin-password"
 name = "web-01"
 ```
 
-With systemd, use `LoadCredential=` to provide `admin-password` to the server.
+Use the [systemd drop-in above](#systemd-credential) to supply `admin-password`.
 
-## Validate a config
+## Validate the file
 
 Pass a path to `vigilo config check` or set `VIGILO_CONFIG_PATH`. A command-line
 path takes priority. If you omit the path and the variable is empty or unset,
@@ -58,11 +81,11 @@ VIGILO_CONFIG_PATH=/path/to/vigilo.toml vigilo config check
 vigilo config check ./vigilo.toml
 ```
 
-The command validates every section in the file. Before starting the server,
-separately check access to the password source and database and make sure the
-listen port is available.
+The command validates every section. Before starting the server, separately
+confirm it can read the password source, open the database, and bind to the
+configured address.
 
-## Settings reference
+## All settings
 
 ### Server
 

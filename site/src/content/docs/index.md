@@ -10,7 +10,7 @@ hero:
   title: >-
     <span class="vigilo-name">Vigilo</span>
     <span class="vigilo-headline">Self-hosted monitoring</span>
-  tagline: Monitor uptime and resource usage from your own infrastructure.
+  tagline: Track uptime and resource usage across your infrastructure.
   image:
     html: >-
       <img src="/vigilo.svg" alt="" width="128" height="128" fetchpriority="high" />
