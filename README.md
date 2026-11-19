@@ -1,20 +1,18 @@
-# vigilo
+# Vigilo
 
-lightweight, self-hosted uptime and resource monitoring with alerting.
+Vigilo is a self-hosted uptime and resource monitor in development.
 
-## development
+[Learn how to write and validate a config](https://vigilo.syed.page/docs/configure/).
 
-install [mise](https://mise.jdx.dev/getting-started.html), then run:
+## Development
+
+Install [mise](https://mise.jdx.dev/getting-started.html), then run:
 
 ```sh
 mise install
 mise run dev
 ```
 
-list development tasks with `mise tasks`. git hooks are installed automatically.
+List development tasks with `mise tasks`. Git hooks are installed automatically.
 
-run the cli with args:
-
-```sh
-mise vigilo config
-```
+Run `mise vigilo config --help` for config commands.
