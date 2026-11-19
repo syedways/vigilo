@@ -5,7 +5,7 @@ import "go:strings"
 import "server"
 
 fn minimal_server() -> string {
-  "role = \"server\"\n[admin]\nusername = \"admin\"\npassword_file = \"/missing/password\"\n"
+  "[server.admin]\nusername = \"admin\"\npassword_file = \"/missing/password\"\n"
 }
 
 #[test]
@@ -19,12 +19,11 @@ fn server_defaults_and_secret_source() {
 
 #[test]
 fn full_server_config() {
-  let contents = "role = \"server\"
-[server]
+  let contents = "[server]
 listen = \"[::1]:9000\"
-[storage]
+[server.storage]
 path = \"/srv/vigilo/state.db\"
-[admin]
+[server.admin]
 username = \"operator\"
 password_credential = \"admin-password.1\"
 "
@@ -38,7 +37,7 @@ password_credential = \"admin-password.1\"
 #[test]
 fn minimal_agent_config() {
   let assert Ok(Config.Agent(settings)) = parse(
-    "role = \"agent\"\n[machine]\nname = \"web-01\"\n".bytes(),
+    "[agent]\nname = \"web-01\"\n".bytes(),
   )
   assert settings.machine_name == "web-01"
 }
@@ -64,7 +63,7 @@ fn config_sections_support_one_or_both_roles() {
 }
 
 #[test]
-fn shared_configs_reject_invalid_sections_and_mixed_formats() {
+fn shared_configs_reject_invalid_sections() {
   let server_section = "[server.admin]\nusername = \"admin\"\npassword_file = \"/missing/password\"\n"
   let agent_section = "[agent]\nname = \"web-01\"\n"
   for contents in [
@@ -74,7 +73,6 @@ fn shared_configs_reject_invalid_sections_and_mixed_formats() {
     f"{server_section}password_credential = \"\"\n{agent_section}",
     f"{server_section}{agent_section}Name = \"alias\"\n",
     f"{server_section}{agent_section}unknown = true\n",
-    f"role = \"agent\"\n[machine]\nname = \"legacy\"\n{agent_section}",
     "agent = []",
     "server = true",
   ] {
@@ -83,32 +81,28 @@ fn shared_configs_reject_invalid_sections_and_mixed_formats() {
 }
 
 #[test]
-fn rejects_missing_invalid_and_mistyped_roles() {
+fn rejects_missing_sections_and_legacy_roles() {
   let assert Err(missing) = parse("".bytes())
   assert missing.Error().contains("config requires a server or agent section")
   for contents in [
-    "role = \"\"",
-    "role = \"serve\"",
-    "role = 1",
-    "role = [\"agent\"]",
+    "role = \"server\"\n[admin]\nusername = \"admin\"\npassword_file = \"/missing/password\"\n",
+    "role = \"agent\"\n[machine]\nname = \"web-01\"\n",
+    f"role = \"server\"\n{minimal_server()}",
   ] {
     let assert Err(err) = parse(contents.bytes())
-    assert err.Error().contains("role")
+    assert err.Error().contains("unknown config field")
   }
-  assert parse("role =".bytes()).is_err()
-  assert parse("role = \"agent\"\nrole = \"server\"".bytes()).is_err()
 }
 
 #[test]
-fn rejects_unknown_and_other_role_fields() {
+fn rejects_unknown_fields() {
   for contents in [
     f"unknown = true\n{minimal_server()}",
     f"{minimal_server()}unknown = true\n",
     f"{minimal_server()}[machine]\nname = \"web\"\n",
     f"{minimal_server()}[unused]\n",
-    "role = \"agent\"\n[machine]\nname = \"web\"\nunknown = true\n",
-    "role = \"agent\"\n[machine]\nname = \"web\"\n[server]\nlisten = \"localhost:9000\"\n",
-    "role = \"agent\"\n[machine]\nname = \"web\"\n[admin]\n",
+    "[agent]\nname = \"web\"\nunknown = true\n",
+    "[agent]\nname = \"web\"\n[agent.admin]\n",
   ] {
     let assert Err(err) = parse(contents.bytes())
     assert err.Error().contains("decode")
@@ -137,29 +131,28 @@ fn rejects_mixed_case_keys_and_aliases() {
     f"{minimal_server()}Password_Credential = \"admin-password\"\n",
     f"{minimal_server()}Password_File = \"/different/password\"\n",
     strings.ReplaceAll(minimal_server(), "password_file", "Password_File"),
-    strings.ReplaceAll(minimal_server(), "[admin]", "[Admin]"),
-    f"{minimal_server()}[Admin]\npassword_credential = \"admin-password\"\n",
-    f"Role = \"agent\"\n{minimal_server()}",
+    strings.ReplaceAll(minimal_server(), "[server.admin]", "[server.Admin]"),
+    f"{minimal_server()}[server.Admin]\npassword_credential = \"admin-password\"\n",
+    strings.ReplaceAll(minimal_server(), "[server.admin]", "[Server.admin]"),
     f"{minimal_server()}[server]\nlisten = \"127.0.0.1:8080\"\nListen = \"0.0.0.0:8080\"\n",
-    "role = \"server\"\nadmin = { username = \"admin\", password_file = \"/missing/password\", Password_Credential = \"admin-password\" }\n",
-    "role = \"agent\"\n[machine]\nname = \"web-01\"\nName = \"web-02\"\n",
-    "role = \"agent\"\n[Machine]\nname = \"web-01\"\n",
+    "server = { admin = { username = \"admin\", password_file = \"/missing/password\", Password_Credential = \"admin-password\" } }\n",
+    "[agent]\nname = \"web-01\"\nName = \"web-02\"\n",
+    "[Agent]\nname = \"web-01\"\n",
   ] {
-    assert parse(contents.bytes()).is_err()
+    let assert Err(err) = parse(contents.bytes())
+    assert err.Error().contains("config keys must be lowercase")
   }
 }
 
 #[test]
 fn decode_errors_keep_safe_context() {
-  let assert Err(syntax_err) = parse("role =".bytes())
+  let assert Err(syntax_err) = parse("[agent]\nname =".bytes())
   assert syntax_err.Error().contains("decode TOML")
-  assert syntax_err.Error().contains("line 1, column")
-  let assert Err(type_err) = parse(
-    "role = \"agent\"\n[machine]\nname = 1\n".bytes(),
-  )
-  assert type_err.Error().contains("decode agent config")
+  assert syntax_err.Error().contains("line 2, column")
+  let assert Err(type_err) = parse("[agent]\nname = 1\n".bytes())
+  assert type_err.Error().contains("decode config sections")
   assert type_err.Error().contains("invalid TOML")
-  assert type_err.Error().contains("line 3, column")
+  assert type_err.Error().contains("line 2, column")
   let assert Err(field_err) = parse(
     f"{minimal_server()}unknown = true\n".bytes(),
   )
@@ -169,10 +162,10 @@ fn decode_errors_keep_safe_context() {
 #[test]
 fn rejects_missing_and_invalid_values() {
   for contents in [
-    "role = \"server\"",
-    "role = \"agent\"",
-    "role = \"agent\"\n[machine]\nname = \"  \"\n",
-    "role = \"agent\"\n[machine]\nname = 1\n",
+    "[server]\n",
+    "[agent]\n",
+    "[agent]\nname = \"  \"\n",
+    "[agent]\nname = 1\n",
     strings.ReplaceAll(
       minimal_server(),
       "username = \"admin\"",
@@ -183,8 +176,8 @@ fn rejects_missing_and_invalid_values() {
       "/missing/password",
       "relative/password",
     ),
-    f"{minimal_server()}[storage]\npath = \"relative.db\"\n",
-    f"{minimal_server()}[storage]\npath = \"\"\n",
+    f"{minimal_server()}[server.storage]\npath = \"relative.db\"\n",
+    f"{minimal_server()}[server.storage]\npath = \"\"\n",
   ] {
     assert parse(contents.bytes()).is_err()
   }
@@ -193,7 +186,7 @@ fn rejects_missing_and_invalid_values() {
 #[test]
 fn requires_exactly_one_nonempty_secret_selector() {
   for contents in [
-    "role = \"server\"\n[admin]\nusername = \"admin\"\n",
+    "[server.admin]\nusername = \"admin\"\n",
     f"{minimal_server()}password_credential = \"admin-password\"\n",
     f"{minimal_server()}password_credential = \"\"\n",
     strings.ReplaceAll(minimal_server(), "/missing/password", ""),
@@ -215,7 +208,7 @@ fn loading_config_never_reads_secrets_or_creates_state() -> Result<(), error> {
   }
   let config_path = filepath.Join(dir, "server.toml")
   let storage_path = filepath.Join(dir, "missing", "state.db")
-  let contents = f"{minimal_server()}[storage]\npath = \"{storage_path}\"\n"
+  let contents = f"{minimal_server()}[server.storage]\npath = \"{storage_path}\"\n"
   os.WriteFile(config_path, contents.bytes(), 0o600)?
   let assert Config.Server(_) = load(config_path)?
   assert os.Stat(filepath.Join(dir, "missing")).is_err()

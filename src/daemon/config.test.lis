@@ -23,7 +23,7 @@ fn config_check_path_precedence() -> Result<(), error> {
     }
   }
 
-  let valid = "role = \"agent\"\n[machine]\nname = \"dev\"\n".bytes()
+  let valid = "[agent]\nname = \"dev\"\n".bytes()
   os.WriteFile("explicit.toml", valid, 0o600)?
   let args = ["config", "check"]
 
