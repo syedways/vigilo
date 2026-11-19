@@ -16,7 +16,7 @@ hero:
       <img src="/vigilo.svg" alt="" width="128" height="128" fetchpriority="high" />
   actions:
     - text: Read the docs
-      link: /docs/
+      link: /docs/introduction/
       icon: right-arrow
     - text: GitHub
       link: https://github.com/syedways/vigilo

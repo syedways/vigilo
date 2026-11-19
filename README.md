@@ -2,7 +2,7 @@
 
 Vigilo is a self-hosted uptime and resource monitor in development.
 
-[Learn how to write and validate a config](https://vigilo.syed.page/docs/configure/).
+[Learn how to write and validate a config](https://vigilo.syed.page/reference/configuration/).
 
 ## Development
 
