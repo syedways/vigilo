@@ -21,7 +21,16 @@ pub enum Config {
 struct SectionsInput { server: ServerInput, agent: AgentInput }
 
 #[toml]
-struct ServerInput { listen: string, storage: StorageInput, admin: AdminInput }
+struct ServerInput {
+  listen: string,
+  auth: string,
+  storage: StorageInput,
+  admin: AdminInput,
+  tls: TlsInput,
+}
+
+#[toml]
+struct TlsInput { certificate_file: string, key_file: string }
 
 #[toml]
 struct StorageInput { path: string }
@@ -48,6 +57,7 @@ fn parse(contents: Slice<byte>) -> Result<Config, error> {
   let mut input = SectionsInput {
     server: ServerInput {
       listen: DEFAULT_LISTEN,
+      auth: "password",
       storage: StorageInput { path: DEFAULT_STORAGE_PATH },
       ..,
     },
@@ -111,21 +121,41 @@ fn validate_server(
   input: ServerInput,
   fields: Map<string, Unknown>,
 ) -> Result<server.Config, error> {
-  server.validate_listen(input.listen)?
   let storage_path = input.storage.path
   if !filepath.IsAbs(storage_path) || strings.ContainsRune(storage_path, '\0') {
     return Err(errors.New("storage.path must be an absolute path without NUL"))
   }
-  let password = select_password(input.admin, fields)?
-  validate_name(input.admin.username, "admin.username")?
-  Ok(
-    server.Config {
-      listen: input.listen,
-      storage_path,
-      admin_username: input.admin.username,
-      password,
+  let auth = match input.auth {
+    "password" => {
+      let source = select_password(input.admin, fields)?
+      let username = input.admin.username
+      validate_name(username, "admin.username")?
+      if strings.ContainsRune(username, ':') {
+        return Err(errors.New("admin.username must not contain a colon"))
+      }
+      server.AuthConfig.Password { username, source }
     },
-  )
+    "none" => {
+      if fields.get("admin").is_some() {
+        return Err(errors.New("omit server.admin when server.auth is none"))
+      }
+      server.AuthConfig.Disabled
+    },
+    _ => return Err(errors.New("server.auth must be password or none")),
+  }
+  let tls = if fields.get("tls").is_some() {
+    Some(
+      server.TlsFiles {
+        certificate_file: input.tls.certificate_file,
+        key_file: input.tls.key_file,
+      },
+    )
+  } else {
+    None
+  }
+  let settings = server.Config { listen: input.listen, storage_path, auth, tls }
+  server.validate_endpoint(settings)?
+  Ok(settings)
 }
 
 fn select_password(

@@ -1,0 +1,144 @@
+import "go:context"
+import "go:crypto/tls"
+import "go:errors"
+import "go:fmt"
+import "go:net"
+import "go:net/http"
+import "go:strings"
+import "go:time"
+
+pub fn run(
+  ctx: context.Context,
+  settings: Config,
+  credentials_dir: string,
+) -> Result<(), error> {
+  validate_endpoint(settings)?
+  let auth = load_auth(settings.auth, credentials_dir)?
+  let tls_settings = match settings.tls {
+    Some(files) => {
+      let certificate = tls
+        .LoadX509KeyPair(files.certificate_file, files.key_file)
+        .wrap_err("load server TLS certificate and key")?
+      Some(
+        tls.Config {
+          Certificates: [certificate],
+          MinVersion: tls.VersionTLS12 as uint16,
+          NextProtos: ["h2", "http/1.1"],
+          ..,
+        },
+      )
+    },
+    None => None,
+  }
+  let listener = net.Listen("tcp", settings.listen).wrap_err("listen")?
+  defer listener.Close()
+  match tls_settings {
+    Some(config) => serve_http(
+      ctx,
+      tls.NewListener(listener, &config),
+      auth,
+      "https",
+    ),
+    None => serve_http(ctx, listener, auth, "http"),
+  }
+}
+
+fn serve_http(
+  ctx: context.Context,
+  listener: net.Listener,
+  auth: Auth,
+  scheme: string,
+) -> Result<(), error> {
+  let Some(address) = listener.Addr() else {
+    return Err(errors.New("listener has no address"))
+  }
+  let mut server = http.Server {
+    Handler: Some(Handler { auth }),
+    ReadHeaderTimeout: 5 * time.Second,
+    ReadTimeout: 10 * time.Second,
+    WriteTimeout: 10 * time.Second,
+    IdleTimeout: 60 * time.Second,
+    MaxHeaderBytes: 16 * 1024,
+    ..,
+  }
+  defer server.Close()
+  let finished = Channel.buffered<Result<(), error>>(1)
+  task {
+    let _ = finished.send(server.Serve(listener))
+  }
+  fmt.Println(f"server: listening on {scheme}://{address.String()}")
+  select {
+    match finished.receive() {
+      Some(result) => result,
+      None => Err(errors.New("HTTP task stopped without a result")),
+    },
+    match ctx.Done().receive() {
+      Some(_) => Err(errors.New(
+        "unexpected value on context cancellation channel",
+      )),
+      None => {
+        let (shutdown_ctx, cancel) = context.WithTimeout(
+          context.Background(),
+          5 * time.Second,
+        )
+        defer cancel()
+        server.Shutdown(shutdown_ctx).wrap_err("HTTP shutdown")?
+        let Some(result) = finished.receive() else {
+          return Err(errors.New("HTTP task stopped without a result"))
+        }
+        match result {
+          Ok(()) => Ok(()),
+          Err(err) if errors.Is(err, http.ErrServerClosed) => Ok(()),
+          Err(err) => Err(err),
+        }
+      },
+    },
+  }
+}
+
+struct Handler { auth: Auth }
+
+impl Handler {
+  fn ServeHTTP(
+    self,
+    response: http.ResponseWriter,
+    request: mut Ref<http.Request>,
+  ) {
+    if let Auth.Disabled = self.auth {
+      if !is_loopback_host(request.Host) {
+        http.Error(response, "forbidden host", http.StatusForbidden)
+        return
+      }
+    }
+    let Some(url) = request.URL else {
+      http.NotFound(response, request)
+      return
+    }
+    if url.Path != "/healthz" {
+      if !permits(self.auth, request) {
+        response
+          .Header()
+          .Set("WWW-Authenticate", "Basic realm=\"Vigilo\", charset=\"UTF-8\"")
+        http.Error(response, "unauthorized", http.StatusUnauthorized)
+        return
+      }
+      http.NotFound(response, request)
+      return
+    }
+    if request.Method != "GET" {
+      response.Header().Set("Allow", "GET")
+      http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+      return
+    }
+    response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+    let _ = fmt.Fprintln(response, "ok")
+  }
+}
+
+fn is_loopback_host(authority: string) -> bool {
+  let host = match net.SplitHostPort(authority) {
+    Ok((host, _)) => host,
+    Err(_) => strings.TrimSuffix(strings.TrimPrefix(authority, "["), "]"),
+  }
+  strings.EqualFold(host, "localhost") || is_loopback_ip(host)
+}

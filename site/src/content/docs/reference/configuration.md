@@ -11,8 +11,7 @@ Copy one of the examples into `/etc/vigilo/vigilo.toml`. Use lowercase keys.
 
 ### Server only
 
-Set the admin password using one of the options below. Both use the default
-listen address and database path.
+Use a password file or a systemd credential to supply the admin password.
 
 #### Password file
 
@@ -41,6 +40,40 @@ LoadCredential=admin-password:/run/secrets/vigilo-admin
 ```
 
 The credential name `admin-password` matches `password_credential` in the TOML.
+
+#### HTTPS directly from Vigilo
+
+```toml title="/etc/vigilo/vigilo.toml"
+[server]
+listen = "0.0.0.0:8443"
+
+[server.admin]
+username = "admin"
+password_file = "/run/secrets/vigilo-admin"
+
+[server.tls]
+certificate_file = "/run/secrets/vigilo-tls/fullchain.pem"
+key_file = "/run/secrets/vigilo-tls/privkey.pem"
+```
+
+Use a PEM certificate chain for the hostname clients connect to and its
+matching PEM private key. Give the server read access to both files, and
+restrict access to the private key. Restart Vigilo to load a renewed
+certificate. By default, Vigilo listens on loopback. Set `listen` explicitly
+to serve HTTPS on another interface.
+
+#### Without built-in authentication
+
+```toml title="/etc/vigilo/vigilo.toml"
+[server]
+auth = "none"
+```
+
+Omit `[server.admin]` in this mode. Any process that can reach Vigilo's loopback
+listener can access the server. If you proxy it to other machines, require
+authentication at the proxy and set the upstream `Host` header to the
+loopback address, such as `127.0.0.1:8080`. Vigilo accepts only `localhost`
+and loopback IPs in the `Host` header when built-in authentication is disabled.
 
 ### Agent only
 
@@ -81,9 +114,11 @@ VIGILO_CONFIG_PATH=/path/to/vigilo.toml vigilo config check
 vigilo config check ./vigilo.toml
 ```
 
-The command validates every section. Before starting the server, separately
-confirm it can read the password source, open the database, and bind to the
-configured address.
+The command validates every section without opening the password source
+or TLS files.
+Start the server with `vigilo server`, which uses the same config path
+precedence. At startup, Vigilo checks the password and loads the configured
+TLS pair before opening the listener.
 
 ## All settings
 
@@ -91,14 +126,24 @@ configured address.
 
 | Key | Default | Accepted values |
 | --- | --- | --- |
-| `server.listen` | `"127.0.0.1:8080"` | `host:port` with a decimal port from 0 to 65535. Use brackets for IPv6, as in `"[::1]:8080"`. |
-| `server.storage.path` | `"/var/lib/vigilo/vigilo.db"` | Absolute SQLite database path |
-| `server.admin.username` | Required | Username on a single line |
+| `server.listen` | `"127.0.0.1:8080"` | Host and a decimal port from 0 to 65535. A non-loopback address requires both TLS and password auth. Use brackets for IPv6, as in `"[::1]:8080"`. |
+| `server.auth` | `"password"` | `"password"` for one configured admin, or `"none"` to disable built-in authentication |
+| `server.tls.certificate_file` | None | Absolute path to the PEM certificate chain. Required if `server.tls` is present. |
+| `server.tls.key_file` | None | Absolute path to the matching PEM private key. Required if `server.tls` is present. |
+| `server.storage.path` | `"/var/lib/vigilo/vigilo.db"` | Absolute database path. Reserved for persistent check history. |
+| `server.admin.username` | Required in password mode | Username on a single line without a colon |
 | `server.admin.password_file` | None | Absolute password file path |
 | `server.admin.password_credential` | None | Credential name containing ASCII letters, digits, dots, underscores, or hyphens. `.` and `..` are invalid. |
 
-Choose one password source. Use 1 to 1,024 bytes on a single line. Vigilo
-removes a final LF or CRLF and keeps spaces and tabs.
+In password mode, choose one password source. The password must have at least
+6 characters and at most 1,024 bytes on a single line. Vigilo removes a final
+LF or CRLF when reading the file and preserves the other bytes. To rotate the
+password, replace the secret and restart Vigilo.
+
+The server uses HTTP Basic authentication in password mode. For remote
+access, configure HTTPS directly in Vigilo or use an HTTPS reverse proxy
+in front of its loopback listener. `GET /healthz` is available without
+credentials in either mode.
 
 ### Agent
 
