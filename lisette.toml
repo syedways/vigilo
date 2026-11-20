@@ -3,4 +3,4 @@ name = "vigilo"
 version = "0.1.0"
 
 [dependencies.go]
-"github.com/pelletier/go-toml/v2" = "v2.2.4"
+"github.com/pelletier/go-toml/v2" = "v2.4.3"
