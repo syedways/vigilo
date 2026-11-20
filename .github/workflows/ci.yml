@@ -16,15 +16,26 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MISE_ENABLE_TOOLS: go,lisette,hk,jactionlint,gitleaks,pkl,taplo
   MISE_LOCKED: "1"
   MISE_NO_HOOKS: "1"
 
 jobs:
   verify:
-    name: Vigilo CI
+    name: ${{ matrix.name }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: lint
+            name: Lint
+            tools: go,lisette,hk,jactionlint,gitleaks,pkl,taplo
+          - check: app
+            name: Test and build
+            tools: go,lisette
+    env:
+      MISE_ENABLE_TOOLS: ${{ matrix.tools }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,7 +46,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/mise/downloads-cas
-          key: mise-ci-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock') }}
+          key: mise-ci-downloads-${{ matrix.check }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.lock') }}
 
       - name: Set up mise
         uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
@@ -45,5 +56,14 @@ jobs:
           env: false
           add_shims_to_path: false
 
-      - name: Lint, test, and build
-        run: mise run verify
+      - name: Lint
+        if: ${{ matrix.check == 'lint' }}
+        run: mise run lint
+
+      - name: Test
+        if: ${{ matrix.check == 'app' }}
+        run: mise run test
+
+      - name: Build
+        if: ${{ matrix.check == 'app' }}
+        run: mise run build
