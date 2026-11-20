@@ -1,6 +1,6 @@
-amends "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Config.pkl"
+amends "package://github.com/jdx/hk/releases/download/v2.13.0/hk@2.13.0#/Config.pkl"
 
-import "package://github.com/jdx/hk/releases/download/v2.11.1/hk@2.11.1#/Builtins.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.13.0/hk@2.13.0#/Builtins.pkl"
 
 exclude = List("target/**")
 
@@ -51,14 +51,22 @@ local linters = new Mapping<String, Step> {
   ["lisette-format"] {
     glob = List("src/**/*.lis")
     // lis format takes one path; format the project once for any source change.
-    check = "mise run format:check"
-    fix = "mise run format"
-    stage = List("src/**/*.lis")
+    check = new CommandSpec {
+      command = "mise run format:check"
+      effect = "read"
+    }
+    fix = new CommandSpec {
+      command = "mise run format"
+      effect = "write"
+    }
     exclusive = true
   }
   ["lisette-check"] {
     glob = List("src/**/*.lis", "lisette.toml", "mise.toml")
-    check = "mise run check -- --deny warnings"
+    check = new CommandSpec {
+      command = "mise run check -- --deny warnings"
+      effect = "write"
+    }
     depends = List("lisette-format", "taplo")
     exclusive = true
   }
@@ -71,8 +79,8 @@ hooks {
     }
   }
   ["pre-commit"] {
-    fix = true
-    stage = true
+    fix = false
+    stage = false
     stash = "git"
     steps = linters
   }
@@ -91,11 +99,17 @@ hooks {
     stage = false
     steps {
       ["test"] {
-        check = "mise run test"
+        check = new CommandSpec {
+          command = "mise run test"
+          effect = "write"
+        }
         exclusive = true
       }
       ["build"] {
-        check = "mise run build"
+        check = new CommandSpec {
+          command = "mise run build"
+          effect = "write"
+        }
         depends = List("test")
         exclusive = true
       }

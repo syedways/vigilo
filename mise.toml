@@ -1,16 +1,19 @@
 [tools]
 go = "1.27"
-node = "26.13.0"
+node = "26.13.1"
 aube = "2.10.1"
 lisette = { version = "0.13.1", version_prefix = "lisette-v" }
 watchexec = "latest"
 
 # formatting/linting
-hk = "2.11.1"
+hk = "2.13.0"
 jactionlint = "2.6.0"
 gitleaks = "latest"
-pkl = "0.32.2"
+pkl = "0.33.1"
 taplo = "0.10.0"
+
+[settings]
+lockfile = true
 
 [hooks]
 postinstall = "mise run hooks:install"
@@ -20,16 +23,12 @@ description = "Install this clone's Git hooks with the mise environment"
 run = "hk install --mise"
 
 [tasks.lint]
-description = "Check all files with hk without modifying or staging files"
-run = "hk check --all --check"
+description = "Validate hk and check all files without modifying or staging them"
+run = ["hk validate --deny-warnings", "hk check --all --check --safe"]
 
 [tasks.fix]
 description = "Apply hk fixes to all files without staging them"
-run = "hk fix --all --no-stage"
-
-[tasks."pre-commit"]
-description = "Run the commit hook on staged files"
-run = "hk run pre-commit"
+run = "hk fix --all --no-stage --safe"
 
 [tasks.vigilo]
 description = "Compile and run vigilo"
