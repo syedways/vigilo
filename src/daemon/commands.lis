@@ -9,7 +9,7 @@ enum Action {
 }
 
 fn root_commands() -> Slice<Command> {
-  [config_command()]
+  [config_command(), server_command()]
 }
 
 pub fn run(

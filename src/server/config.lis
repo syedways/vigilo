@@ -7,8 +7,46 @@ import "go:strings"
 pub struct Config {
   pub listen: string,
   pub storage_path: string,
-  pub admin_username: string,
-  pub password: SecretSource,
+  pub auth: AuthConfig,
+  pub tls: Option<TlsFiles>,
+}
+
+pub struct TlsFiles {
+  pub certificate_file: string,
+  pub key_file: string,
+}
+
+pub enum AuthConfig {
+  Password { username: string, source: SecretSource },
+  Disabled,
+}
+
+pub fn validate_endpoint(settings: Config) -> Result<(), error> {
+  validate_listen(settings.listen)?
+  if let Some(files) = settings.tls {
+    validate_absolute_path(
+      files.certificate_file,
+      "server.tls.certificate_file",
+    )?
+    validate_absolute_path(files.key_file, "server.tls.key_file")?
+  }
+  let (host, _) = net.SplitHostPort(settings.listen)?
+  if is_loopback_ip(host) { return Ok(()) }
+  if settings.auth == AuthConfig.Disabled {
+    return Err(errors.New(
+      "server.listen must use a loopback IP when auth is none",
+    ))
+  }
+  if settings.tls.is_none() {
+    return Err(errors.New("server.listen must use a loopback IP without TLS"))
+  }
+  Ok(())
+}
+
+fn is_loopback_ip(host: string) -> bool {
+  netip
+    .ParseAddr(host)
+    .map_or(false, |ip| ip.Zone() == "" && ip.Unmap().IsLoopback())
 }
 
 pub fn validate_listen(address: string) -> Result<(), error> {

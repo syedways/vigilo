@@ -12,9 +12,11 @@ fn minimal_server() -> string {
 fn server_defaults_and_secret_source() {
   let assert Ok(Config.Server(settings)) = parse(minimal_server().bytes())
   assert settings.listen == "127.0.0.1:8080"
+  assert settings.tls.is_none()
   assert settings.storage_path == "/var/lib/vigilo/vigilo.db"
-  assert settings.admin_username == "admin"
-  assert settings.password == server.SecretSource.File("/missing/password")
+  let assert server.AuthConfig.Password { username, source } = settings.auth
+  assert username == "admin"
+  assert source == server.SecretSource.File("/missing/password")
 }
 
 #[test]
@@ -30,8 +32,9 @@ password_credential = \"admin-password.1\"
   let assert Ok(Config.Server(settings)) = parse(contents.bytes())
   assert settings.listen == "[::1]:9000"
   assert settings.storage_path == "/srv/vigilo/state.db"
-  assert settings.admin_username == "operator"
-  assert settings.password == server.SecretSource.Credential("admin-password.1")
+  let assert server.AuthConfig.Password { username, source } = settings.auth
+  assert username == "operator"
+  assert source == server.SecretSource.Credential("admin-password.1")
 }
 
 #[test]
@@ -55,9 +58,9 @@ fn config_sections_support_one_or_both_roles() {
   assert server_only.storage_path == "/var/lib/vigilo/vigilo.db"
   assert shared_server.listen == "[::1]:9000"
   assert shared_server.storage_path == "/srv/vigilo/state.db"
-  assert shared_server.admin_username == "admin"
-  assert shared_server.password ==
-  server.SecretSource.Credential("admin-password")
+  let assert server.AuthConfig.Password { username, source } = shared_server.auth
+  assert username == "admin"
+  assert source == server.SecretSource.Credential("admin-password")
   assert agent_only.machine_name == "web-01"
   assert shared_agent.machine_name == agent_only.machine_name
 }
@@ -198,6 +201,52 @@ fn requires_exactly_one_nonempty_secret_selector() {
   ] {
     assert parse(contents.bytes()).is_err()
   }
+}
+
+#[test]
+fn auth_modes_require_a_loopback_listener_and_exclusive_settings() {
+  let assert Ok(Config.Server(settings)) = parse(
+    "[server]\nauth = \"none\"\nlisten = \"[::1]:8080\"\n".bytes(),
+  )
+  let assert server.AuthConfig.Disabled = settings.auth
+
+  for contents in [
+    "[server]\nauth = \"password\"\n",
+    "[server]\nauth = \"\"\n",
+    "[server]\nauth = \"unknown\"\n",
+    f"[server]\nauth = \"none\"\n{minimal_server()}",
+    "[server]\nauth = \"none\"\n[server.admin]\n",
+    "[server]\nauth = \"none\"\nlisten = \"0.0.0.0:8080\"\n",
+    "[server]\nauth = \"none\"\nlisten = \"[::]:8080\"\n",
+    f"[server]\nlisten = \"192.0.2.1:8080\"\n{minimal_server()}",
+    strings.ReplaceAll(minimal_server(), "admin\"", "admin:operator\""),
+  ] {
+    assert parse(contents.bytes()).is_err()
+  }
+}
+
+#[test]
+fn tls_allows_remote_password_auth_and_requires_both_paths() {
+  let tls = "[server.tls]\ncertificate_file = \"/missing/cert.pem\"\nkey_file = \"/missing/key.pem\"\n"
+  let remote = "[server]\nlisten = \"0.0.0.0:8443\"\n"
+  let assert Ok(Config.Server(settings)) = parse(
+    f"{remote}{minimal_server()}{tls}".bytes(),
+  )
+  let assert Some(files) = settings.tls
+  assert files.certificate_file == "/missing/cert.pem"
+  assert files.key_file == "/missing/key.pem"
+
+  for invalid in [
+    "[server.tls]\n",
+    "[server.tls]\ncertificate_file = \"/missing/cert.pem\"\n",
+    "[server.tls]\nkey_file = \"/missing/key.pem\"\n",
+    strings.ReplaceAll(tls, "/missing/cert.pem", "cert.pem"),
+    strings.ReplaceAll(tls, "/missing/key.pem", "key.pem"),
+  ] {
+    assert parse(f"{minimal_server()}{invalid}".bytes()).is_err()
+  }
+  let assert Err(err) = parse(f"{remote}auth = \"none\"\n{tls}".bytes())
+  assert err.Error().contains("must use a loopback IP when auth is none")
 }
 
 #[test]

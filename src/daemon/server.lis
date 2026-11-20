@@ -1,0 +1,35 @@
+import "go:context"
+import "go:errors"
+import "go:os"
+import "go:os/signal"
+import "go:syscall"
+
+import "config"
+import "server"
+
+fn server_command() -> Command {
+  Command {
+    name: "server",
+    desc: f"run the server using [path], then VIGILO_CONFIG_PATH, then {config.SYSTEM_CONFIG_PATH}",
+    action: Action.Run { args_usage: "[path]", handler: run_server },
+  }
+}
+
+fn run_server(args: Slice<string>) -> Result<(), error> {
+  let path = match args {
+    [] => config.default_path(),
+    [path] => path,
+    _ => return Err(errors.New("expected at most one path")),
+  }
+  let settings = match config.load(path)? {
+    config.Config.Server(settings) | config.Config.Both { server: settings, .. } => settings,
+    config.Config.Agent(_) => return Err(errors.New("requires a server section")),
+  }
+  let (ctx, stop) = signal.NotifyContext(
+    context.Background(),
+    os.Interrupt,
+    syscall.SIGTERM,
+  )
+  defer stop()
+  server.run(ctx, settings, os.Getenv("CREDENTIALS_DIRECTORY"))
+}

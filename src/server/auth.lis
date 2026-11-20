@@ -1,0 +1,62 @@
+import "go:crypto/hmac"
+import "go:crypto/rand"
+import "go:crypto/sha256"
+import "go:errors"
+import "go:net/http"
+import "go:unicode/utf8"
+
+const MIN_PASSWORD_LENGTH = 6
+
+enum Auth {
+  Password { username: string, key: Slice<byte>, digest: Slice<byte> },
+  Disabled,
+}
+
+fn load_auth(config: AuthConfig, credentials_dir: string) -> Result<Auth, error> {
+  match config {
+    AuthConfig.Disabled => Ok(Auth.Disabled),
+    AuthConfig.Password { username, source } => {
+      let password = read_password(source, credentials_dir)?
+      if utf8.RuneCount(password) < MIN_PASSWORD_LENGTH {
+        return Err(errors.New(
+          f"admin password must contain at least {MIN_PASSWORD_LENGTH} characters",
+        ))
+      }
+      let mut key = Slice.make<byte>(32)
+      let _ = rand.Read(key).wrap_err("generate admin password verifier key")?
+      let digest = password_digest(key, password)?
+      Ok(Auth.Password { username, key, digest })
+    },
+  }
+}
+
+fn password_digest(
+  key: Slice<byte>,
+  password: Slice<byte>,
+) -> Result<Slice<byte>, error> {
+  let mac = hmac.New(sha256.New, key)
+  match mac.Write(password) {
+    Partial.Ok(_) => Ok(mac.Sum([])),
+    Partial.Err(err) | Partial.Both(_, err) => Err(err).wrap_err(
+      "hash admin password",
+    ),
+  }
+}
+
+fn permits(auth: Auth, request: Ref<http.Request>) -> bool {
+  match auth {
+    Auth.Disabled => true,
+    Auth.Password { username, key, digest } => {
+      let Some((provided_user, password)) = request.BasicAuth() else {
+        return false
+      }
+      if provided_user != username || password.length() > MAX_PASSWORD_BYTES {
+        return false
+      }
+      password_digest(key, password.bytes()).map_or(
+        false,
+        |provided| hmac.Equal(digest, provided),
+      )
+    },
+  }
+}
