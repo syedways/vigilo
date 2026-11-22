@@ -1,0 +1,84 @@
+import "go:bytes"
+import "go:html/template"
+import "go:net/http"
+import "go:time"
+
+const PAGE = "<!doctype html>
+<html lang='en'>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>{{.Title}} | Vigilo</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    font: 100%/1.55 system-ui, sans-serif;
+    color: light-dark(#202621, #edf2ec);
+    background: light-dark(#f7f8f5, #151b17);
+    --line: light-dark(#ced8cd, #3a483b);
+    --accent: light-dark(#23593c, #a4d7b2);
+  }
+  body { max-width: 54rem; margin: auto; padding: 0 1.25rem 2rem; }
+  header { padding-block: 1rem; border-bottom: 1px solid var(--line); }
+  header a { color: var(--accent); font-weight: 700; }
+  h1 { margin: 2rem 0 1rem; font-size: clamp(1.75rem, 4vw, 2.5rem); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .5rem 1.25rem; }
+  dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+</style>
+<header><a href='/'>Vigilo</a></header>
+<main>{{template \"content\" .}}</main>
+</html>
+"
+
+const OVERVIEW_CONTENT = "{{define \"content\"}}
+<h1>Server overview</h1>
+<dl>
+  <dt>Started (UTC)</dt>
+  <dd><time datetime='{{.StartedAt}}'>{{.StartedAt}}</time></dd>
+  <dt>Uptime</dt>
+  <dd>{{.Uptime}}</dd>
+</dl>
+{{end}}"
+
+struct Overview { page: Ref<template.Template>, started_at: time.Time }
+
+pub struct OverviewPage {
+  pub title: string,
+  pub started_at: string,
+  pub uptime: string,
+}
+
+fn new_overview(started_at: time.Time) -> Result<Overview, error> {
+  let page = parse_page(OVERVIEW_CONTENT)?
+  Ok(Overview { page, started_at })
+}
+
+fn serve_overview(overview: Overview, response: http.ResponseWriter) {
+  render_page(
+    overview.page,
+    response,
+    OverviewPage {
+      title: "Overview",
+      started_at: overview.started_at.UTC().Format(time.RFC3339),
+      uptime: time.Since(overview.started_at).Truncate(time.Second).String(),
+    },
+  )
+}
+
+fn parse_page(content: string) -> Result<Ref<template.Template>, error> {
+  template.New("page").Parse(f"{PAGE}{content}").wrap_err("parse server page")
+}
+
+fn render_page(
+  page: Ref<template.Template>,
+  response: http.ResponseWriter,
+  data: Unknown,
+) {
+  let mut body = bytes.Buffer { .. }
+  if let Err(_) = page.Execute(&body, data) {
+    http.Error(response, "page unavailable", http.StatusInternalServerError)
+    return
+  }
+  response.Header().Set("Content-Type", "text/html; charset=utf-8")
+  response.Header().Set("Cache-Control", "no-store")
+  let _ = response.Write(body.Bytes())
+}

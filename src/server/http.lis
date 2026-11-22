@@ -52,8 +52,9 @@ fn serve_http(
   let Some(address) = listener.Addr() else {
     return Err(errors.New("listener has no address"))
   }
+  let overview = new_overview(time.Now())?
   let mut server = http.Server {
-    Handler: Some(Handler { auth }),
+    Handler: Some(Handler { auth, overview }),
     ReadHeaderTimeout: 5 * time.Second,
     ReadTimeout: 10 * time.Second,
     WriteTimeout: 10 * time.Second,
@@ -96,7 +97,7 @@ fn serve_http(
   }
 }
 
-struct Handler { auth: Auth }
+struct Handler { auth: Auth, overview: Overview }
 
 impl Handler {
   fn ServeHTTP(
@@ -122,12 +123,18 @@ impl Handler {
         http.Error(response, "unauthorized", http.StatusUnauthorized)
         return
       }
-      http.NotFound(response, request)
-      return
+      if url.Path != "/" {
+        http.NotFound(response, request)
+        return
+      }
     }
     if request.Method != "GET" {
       response.Header().Set("Allow", "GET")
       http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+      return
+    }
+    if url.Path == "/" {
+      serve_overview(self.overview, response)
       return
     }
     response.Header().Set("Content-Type", "text/plain; charset=utf-8")
