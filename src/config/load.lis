@@ -1,3 +1,5 @@
+import "go:errors"
+import "go:fmt"
 import "go:os"
 
 pub const SYSTEM_CONFIG_PATH = "/etc/vigilo/vigilo.toml"
@@ -8,6 +10,15 @@ pub fn default_path() -> string {
 }
 
 pub fn load(path: string) -> Result<Config, error> {
-  let contents = os.ReadFile(path).wrap_err("read config")?
-  parse(contents).wrap_err("validate config")
+  let contents = match os.ReadFile(path).wrap_err("read config") {
+    Ok(contents) => contents,
+    Err(err) if path == SYSTEM_CONFIG_PATH && errors.Is(err, os.ErrNotExist) => {
+      return Err(fmt.Errorf(
+        "%w\nHint: Pass a config path or set VIGILO_CONFIG_PATH.",
+        err,
+      ))
+    },
+    Err(err) => return Err(err),
+  }
+  parse(contents).wrap_err(f"validate config {path}")
 }

@@ -42,10 +42,37 @@ outputs = []
 run = "lis run . --"
 
 [tasks.dev]
-description = "Rebuild and restart vigilo on source changes"
+description = "Watch and run vigilo with an optional config path"
+dir = "{{config_root}}"
 raw = true
 quiet = true
-run = "mise watch --restart vigilo"
+run = '''
+#!/bin/sh
+set -eu
+if [ "$#" -gt 1 ]; then
+  printf 'usage: mise run dev [path]\n' >&2
+  exit 2
+fi
+config=${1-vigilo.dev.toml}
+config_dir=$(realpath -m -- "$(dirname -- "$config")")
+root=$(pwd -P)
+
+escape_glob() {
+  printf '%s\n' "$1" | sed 's/[][\\*?{}]/\\&/g; s/ $/\\ /'
+}
+config_filter=$(escape_glob "${config_dir%/}/$(basename -- "$config")")
+root_filter=$(escape_glob "$root")
+
+# watch directories so a rename into place is seen as well as a write.
+exec watchexec --quiet --restart --stop-timeout 10s --wrap-process group \
+  --ignore-nothing --project-origin / --watch src --watch-non-recursive . \
+  --watch-non-recursive "$config_dir" \
+  --filter "$root_filter/src/**/*.lis" --filter "$root_filter/lisette.toml" \
+  --filter "$config_filter" --shell none -- sh -c '
+    trap "exit 0" INT TERM
+    lis run . -- server "$1" || :
+  ' vigilo-dev "$config"
+'''
 
 [tasks.build]
 description = "Build the application binary"
