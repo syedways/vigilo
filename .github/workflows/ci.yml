@@ -33,7 +33,7 @@ jobs:
             tools: go,lisette,hk,jactionlint,gitleaks,pkl,taplo
           - check: app
             name: Test and build
-            tools: go,lisette
+            tools: go,lisette,bun
     env:
       MISE_ENABLE_TOOLS: ${{ matrix.tools }}
     steps:
@@ -64,6 +64,6 @@ jobs:
         if: ${{ matrix.check == 'app' }}
         run: mise run test
 
-      - name: Build
+      - name: Build and run integration tests
         if: ${{ matrix.check == 'app' }}
-        run: mise run build
+        run: mise run test:integration
