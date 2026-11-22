@@ -1,0 +1,79 @@
+import "go:context"
+import "go:database/sql"
+import "go:time"
+
+pub const HISTORY_LIMIT = 100
+
+const RETENTION_DAYS = 7
+
+#[json]
+pub struct Sample {
+  pub checked_at_ms: int64,
+  pub duration_ms: int64,
+  pub outcome: string,
+  #[json(omitempty)]
+  pub status_code: int,
+}
+
+pub fn record(
+  db: mut Ref<sql.DB>,
+  ctx: context.Context,
+  name: string,
+  sample: Sample,
+) -> Result<(), error> {
+  let mut tx = db.BeginTx(ctx, None)?
+  defer tx.Rollback()
+  let _ = tx.ExecContext(
+    ctx,
+    "INSERT INTO check_results (check_name, checked_at_ms, duration_ms, outcome, status_code)
+     VALUES (?, ?, ?, ?, ?)",
+    name,
+    sample.checked_at_ms,
+    sample.duration_ms,
+    sample.outcome,
+    sample.status_code,
+  )?
+  let _ = tx.ExecContext(
+    ctx,
+    "DELETE FROM check_results WHERE checked_at_ms < ?",
+    retention_cutoff(),
+  )?
+  tx.Commit()
+}
+
+pub fn recent(
+  db: mut Ref<sql.DB>,
+  ctx: context.Context,
+  name: string,
+  limit: int,
+) -> Result<Slice<Sample>, error> {
+  let mut rows = db.QueryContext(
+    ctx,
+    "SELECT checked_at_ms, duration_ms, outcome, status_code FROM check_results
+     WHERE check_name = ? AND checked_at_ms >= ? ORDER BY id DESC LIMIT ?",
+    name,
+    retention_cutoff(),
+    limit,
+  )?
+  defer rows.Close()
+  let mut samples = Slice.make<Sample>(0)
+  while rows.Next() {
+    let mut sample = Sample { .. }
+    rows.Scan(
+      &sample.checked_at_ms,
+      &sample.duration_ms,
+      &sample.outcome,
+      &sample.status_code,
+    )?
+    samples = samples.append(sample)
+  }
+  if let Some(err) = rows.Err() { return Err(err) }
+  Ok(samples)
+}
+
+fn retention_cutoff() -> int64 {
+  time
+    .Now()
+    .Add((-RETENTION_DAYS * 24) as time.Duration * time.Hour)
+    .UnixMilli()
+}

@@ -1,0 +1,117 @@
+import _ "go:modernc.org/sqlite"
+import "go:database/sql"
+import "go:errors"
+import "go:io/fs"
+import "go:net/url"
+import "go:os"
+import "go:path/filepath"
+import "go:runtime"
+import "go:strings"
+
+pub fn open(path: string) -> Result<mut Ref<sql.DB>, error> {
+  if !filepath.IsAbs(path) || strings.ContainsRune(path, '\0') {
+    return Err(errors.New("database path must be absolute and contain no NUL"))
+  }
+  prepare_database(path)?
+  let options = strings.Join(
+    [
+      "mode=rw",
+      "_pragma=trusted_schema(OFF)",
+      "_pragma=synchronous(FULL)",
+      "_pragma=foreign_keys(ON)",
+      "_pragma=busy_timeout(5000)",
+      "_pragma=wal_autocheckpoint(1000)",
+      "_txlock=immediate",
+    ],
+    "&",
+  )
+  let location = url.URL { Scheme: "file", Path: path, RawQuery: options, .. }
+  let mut db = sql.Open("sqlite", location.String())?
+  db.SetMaxOpenConns(1)
+  db.SetMaxIdleConns(1)
+  if let Err(err) = initialize(db) {
+    let _ = db.Close()
+    return Err(err)
+  }
+  Ok(db)
+}
+
+fn prepare_database(path: string) -> Result<(), error> {
+  for suffix in ["-wal", "-shm", "-journal"] {
+    match os.Lstat(f"{path}{suffix}") {
+      Ok(info) => validate_database_file(info).wrap_err(f"SQLite {suffix} file")?,
+      Err(err) if errors.Is(err, fs.ErrNotExist) => (),
+      Err(err) => return Err(err).wrap_err(f"inspect SQLite {suffix} file"),
+    }
+  }
+  // create the file before SQLite opens it so the database starts private.
+  match os.OpenFile(path, os.O_WRONLY | os.O_CREATE | os.O_EXCL, 0o600) {
+    Ok(file) => file.Close().wrap_err("close new database file"),
+    Err(err) if errors.Is(err, fs.ErrExist) => {
+      let info = os.Lstat(path).wrap_err("inspect database file")?
+      validate_database_file(info).wrap_err("database file")
+    },
+    Err(err) => Err(err).wrap_err("create database file"),
+  }
+}
+
+fn validate_database_file(info: fs.FileInfo) -> Result<(), error> {
+  let mode = info.Mode()
+  if !mode.IsRegular() { return Err(errors.New("expected a regular file")) }
+  if runtime.GOOS != "windows" && mode.Perm() & 0o077 != 0 {
+    return Err(errors.New("group and other permissions must be unset"))
+  }
+  Ok(())
+}
+
+fn initialize(db: mut Ref<sql.DB>) -> Result<(), error> {
+  migrate(db)?
+  let mut mode = ""
+  db.QueryRow("PRAGMA journal_mode = WAL").Scan(&mode)?
+  if mode != "wal" { return Err(errors.New("SQLite did not activate WAL")) }
+  Ok(())
+}
+
+fn migrate(db: mut Ref<sql.DB>) -> Result<(), error> {
+  let mut tx = db.Begin()?
+  defer tx.Rollback()
+  let mut version = 0
+  tx.QueryRow("PRAGMA user_version").Scan(&version)?
+  match version {
+    0 => create_history_schema(tx)?,
+    1 => (),
+    _ if version < 0 => {
+      return Err(errors.New("invalid database schema version"))
+    },
+    _ => return Err(errors.New("database schema is newer than this binary")),
+  }
+  tx.Commit()
+}
+
+fn create_history_schema(tx: mut Ref<sql.Tx>) -> Result<(), error> {
+  let _ = tx.Exec(
+    "CREATE TABLE check_results (
+      id INTEGER PRIMARY KEY,
+      check_name TEXT NOT NULL,
+      checked_at_ms INTEGER NOT NULL,
+      duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+      outcome TEXT NOT NULL CHECK(outcome IN ('up', 'down', 'timeout', 'error')),
+      status_code INTEGER NOT NULL,
+      CHECK (
+        (outcome = 'up' AND status_code BETWEEN 200 AND 299) OR
+        (outcome = 'down' AND (
+          status_code BETWEEN 100 AND 199 OR status_code BETWEEN 300 AND 999
+        )) OR
+        (outcome IN ('timeout', 'error') AND status_code = 0)
+      )
+    )",
+  )?
+  let _ = tx.Exec(
+    "CREATE INDEX check_results_history ON check_results(check_name, id DESC)",
+  )?
+  let _ = tx.Exec(
+    "CREATE INDEX check_results_retention ON check_results(checked_at_ms)",
+  )?
+  let _ = tx.Exec("PRAGMA user_version = 1")?
+  Ok(())
+}

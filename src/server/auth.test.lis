@@ -2,7 +2,6 @@ import "go:net/http"
 import "go:net/http/httptest"
 import "go:os"
 import "go:path/filepath"
-import "go:time"
 
 #[test]
 fn password_auth_loads_once_and_matches_the_exact_secret() -> Result<(), error> {
@@ -29,7 +28,7 @@ fn password_auth_loads_once_and_matches_the_exact_secret() -> Result<(), error> 
   os.WriteFile(path, f"{password}\r\n".bytes(), 0o600)?
   let auth = load_auth(config, "")?
   os.WriteFile(path, "new-secret-fern-cloud\n".bytes(), 0o600)?
-  let handler = Handler { auth, overview: new_overview(time.Now())? }
+  let handler = new_handler(auth)?
 
   for (username, supplied, code) in [
     ("operator", password, http.StatusNotFound),
@@ -54,10 +53,9 @@ fn password_auth_loads_once_and_matches_the_exact_secret() -> Result<(), error> 
 fn disabled_auth_skips_secrets_and_health_is_public() -> Result<(), error> {
   let mut request = httptest.NewRequest("GET", "/healthz", None)
   let mut response = httptest.NewRecorder()
-  let enabled = Handler {
-    auth: Auth.Password { username: "operator", key: [], digest: [] },
-    overview: new_overview(time.Now())?,
-  }
+  let enabled = new_handler(
+    Auth.Password { username: "operator", key: [], digest: [] },
+  )?
   enabled.ServeHTTP(response, request)
   assert response.Code == http.StatusOK
   let mut request = httptest.NewRequest("GET", "/private", None)
@@ -65,10 +63,7 @@ fn disabled_auth_skips_secrets_and_health_is_public() -> Result<(), error> {
   enabled.ServeHTTP(response, request)
   assert response.Code == http.StatusUnauthorized
   assert response.Header().Get("WWW-Authenticate").contains("Basic realm=")
-  let disabled = Handler {
-    auth: load_auth(AuthConfig.Disabled, "")?,
-    overview: new_overview(time.Now())?,
-  }
+  let disabled = new_handler(load_auth(AuthConfig.Disabled, "")?)?
   for (host, code) in [
     ("localhost", http.StatusNotFound),
     ("127.0.0.1:8080", http.StatusNotFound),

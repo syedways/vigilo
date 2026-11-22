@@ -1,0 +1,76 @@
+import "go:context"
+import "go:database/sql"
+import "go:errors"
+import "go:fmt"
+import "go:net/http"
+import "go:os"
+import "go:time"
+
+import "storage"
+
+fn run_check(
+  ctx: context.Context,
+  db: mut Ref<sql.DB>,
+  name: string,
+  check: HttpCheck,
+) {
+  let mut transport = http.Transport {
+    DisableKeepAlives: true,
+    ForceAttemptHTTP2: true,
+    ..,
+  }
+  let client = http.Client {
+    Transport: Some(&transport),
+    CheckRedirect: Some(|_, _| Err(http.ErrUseLastResponse)),
+    Timeout: 5 * time.Second,
+    ..,
+  }
+  while ctx.Err().is_none() {
+    let started = time.Now()
+    let (outcome, status_code) = probe(ctx, &client, check.url)
+    if ctx.Err().is_some() { return }
+    let sample = storage.Sample {
+      checked_at_ms: started.UnixMilli(),
+      duration_ms: time.Since(started).Milliseconds(),
+      outcome,
+      status_code,
+    }
+    if let Err(err) = storage.record(db, ctx, name, sample) {
+      if ctx.Err().is_some() { return }
+      let _ = fmt.Fprintln(os.Stderr, f"record check {name}: {err}")
+    }
+    let delay = time.After(check.interval)
+    let retry = select {
+      match ctx.Done().receive() {
+        Some(_) => false,
+        None => false,
+      },
+      match delay.receive() {
+        Some(_) => true,
+        None => false,
+      },
+    }
+    if !retry { return }
+  }
+}
+
+fn probe(
+  ctx: context.Context,
+  client: Ref<http.Client>,
+  endpoint: string,
+) -> (string, int) {
+  let Ok(request) = http.NewRequestWithContext(ctx, "GET", endpoint, None) else {
+    return ("error", 0)
+  }
+  match client.Do(request) {
+    Ok(response) => {
+      if let Some(body) = response.Body { let _ = body.Close() }
+      let status = response.StatusCode
+      if status < 100 || status > 999 { return ("error", 0) }
+      let outcome = if status >= 200 && status < 300 { "up" } else { "down" }
+      (outcome, status)
+    },
+    Err(err) if errors.Is(err, context.DeadlineExceeded) => ("timeout", 0),
+    Err(_) => ("error", 0),
+  }
+}
