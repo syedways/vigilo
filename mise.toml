@@ -2,6 +2,7 @@
 go = "1.27"
 node = "26.13.1"
 aube = "2.10.1"
+bun = "1.4.5"
 lisette = { version = "0.13.1", version_prefix = "lisette-v" }
 watchexec = "latest"
 
@@ -67,13 +68,18 @@ run = "lis format --check"
 description = "Run the Lisette test suite"
 run = "lis test"
 
+[tasks."test:integration"]
+description = "Build Vigilo and run the server integration tests"
+depends = ["build"]
+run = "bun test ./tests/server.integration.test.ts"
+
 [tasks.sync]
 description = "Reconcile dependencies with Go imports"
 run = "lis sync"
 
 [tasks.verify]
-description = "Check repository hygiene, lint, test, and build in sequence"
-run = [{ task = "lint" }, { task = "test" }, { task = "build" }]
+description = "Run lint, Lisette tests, and server integration tests in sequence"
+run = [{ task = "lint" }, { task = "test" }, { task = "test:integration" }]
 
 [tasks.docs]
 description = "Run a docs package script"
