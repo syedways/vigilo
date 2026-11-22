@@ -4,7 +4,7 @@ import "go:strings"
 struct Command { name: string, desc: string, action: Action }
 
 enum Action {
-  Run { args_usage: string, handler: fn(Slice<string>) -> Result<(), error> },
+  Run { args_usage: string, details: string, handler: fn(Slice<string>) -> Result<(), error> },
   Group(Slice<Command>),
 }
 
@@ -36,10 +36,10 @@ fn dispatch(
 
   match command.action {
     Action.Group(children) => dispatch(children, command_path, command_args),
-    Action.Run { args_usage, handler } => {
+    Action.Run { args_usage, details, handler } => {
       if let ["--help"] = command_args {
         let syntax = command_syntax(command_path, args_usage)
-        return Ok(Some(f"Usage: {syntax}\n\n{command.desc}"))
+        return Ok(Some(f"Usage: {syntax}\n\n{command.desc}\n\n{details}"))
       }
       handler(command_args).wrap_err(command_path)?
       Ok(None)
@@ -52,28 +52,12 @@ fn command_syntax(path: string, args_usage: string) -> string {
 }
 
 fn group_help(commands: Slice<Command>, path: string) -> string {
-  let rows = command_rows(commands, "  ")
-  f"Usage: {path} <command> [args]\n\nCommands:\n{rows}"
-}
-
-fn command_rows(commands: Slice<Command>, indent: string) -> string {
-  let rows = commands.map(|command| command_row(command, indent))
-  strings.Join(rows, "\n")
-}
-
-fn command_row(command: Command, indent: string) -> string {
-  match command.action {
-    Action.Group(children) => {
-      let syntax = command_syntax(command.name, "<command> [args]")
-      let row = f"{indent}{syntax}: {command.desc}"
-      if children.is_empty() { return row }
-
-      let child_rows = command_rows(children, f"{indent}  ")
-      f"{row}\n{child_rows}"
-    },
-    Action.Run { args_usage, .. } => {
-      let syntax = command_syntax(command.name, args_usage)
-      f"{indent}{syntax}: {command.desc}"
-    },
-  }
+  let rows = commands.map(|command| f"  {command.name}  {command.desc}")
+  let listing = strings.Join(rows, "\n")
+  let sections = [
+    f"Usage: {path} <command> [args]",
+    f"Commands:\n{listing}",
+    f"Run '{path} <command> --help' for command help.",
+  ]
+  strings.Join(sections, "\n\n")
 }

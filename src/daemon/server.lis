@@ -10,20 +10,22 @@ import "server"
 fn server_command() -> Command {
   Command {
     name: "server",
-    desc: f"run the server using [path], then VIGILO_CONFIG_PATH, then {config.SYSTEM_CONFIG_PATH}",
-    action: Action.Run { args_usage: "[path]", handler: run_server },
+    desc: "Start the Vigilo server",
+    action: Action.Run {
+      args_usage: "[path]",
+      details: config_lookup_help(),
+      handler: run_server,
+    },
   }
 }
 
 fn run_server(args: Slice<string>) -> Result<(), error> {
-  let path = match args {
-    [] => config.default_path(),
-    [path] => path,
-    _ => return Err(errors.New("expected at most one path")),
-  }
+  let path = config_path(args)?
   let settings = match config.load(path)? {
     config.Config.Server(settings) | config.Config.Both { server: settings, .. } => settings,
-    config.Config.Agent(_) => return Err(errors.New("requires a server section")),
+    config.Config.Agent(_) => return Err(errors.New(
+      f"validate config {path}: requires a server section",
+    )),
   }
   let (ctx, stop) = signal.NotifyContext(
     context.Background(),

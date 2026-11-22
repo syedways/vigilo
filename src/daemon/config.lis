@@ -5,23 +5,35 @@ import "config"
 fn config_command() -> Command {
   Command {
     name: "config",
-    desc: "manage config",
+    desc: "Manage configuration",
     action: Action.Group([
       Command {
         name: "check",
-        desc: f"validate config using [path], then VIGILO_CONFIG_PATH, then {config.SYSTEM_CONFIG_PATH}",
-        action: Action.Run { args_usage: "[path]", handler: config_check },
+        desc: "Validate a configuration file",
+        action: Action.Run {
+          args_usage: "[path]",
+          details: config_lookup_help(),
+          handler: config_check,
+        },
       },
     ]),
   }
 }
 
-fn config_check(args: Slice<string>) -> Result<(), error> {
-  let path = match args {
-    [] => config.default_path(),
-    [path] => path,
-    _ => return Err(errors.New("expected at most one path")),
+fn config_lookup_help() -> string {
+  f"Config lookup order: [path], then nonempty VIGILO_CONFIG_PATH, then {config.SYSTEM_CONFIG_PATH}."
+}
+
+fn config_path(args: Slice<string>) -> Result<string, error> {
+  match args {
+    [] => Ok(config.default_path()),
+    [path] => Ok(path),
+    _ => Err(errors.New("expected at most one path")),
   }
+}
+
+fn config_check(args: Slice<string>) -> Result<(), error> {
+  let path = config_path(args)?
   let _ = config.load(path)?
   Ok(())
 }

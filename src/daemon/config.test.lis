@@ -35,17 +35,34 @@ fn config_check_path_precedence() -> Result<(), error> {
   os.Setenv(key, "override.toml")?
   let assert Err(err) = run("vigilo", args)
   assert err.Error().contains("override.toml")
+  assert !err.Error().contains("Hint:")
   let assert Ok(None) = run("vigilo", args.append("explicit.toml"))
 
   os.WriteFile("override.toml", valid, 0o600)?
   let assert Ok(None) = run("vigilo", args)
+  os.WriteFile("invalid.toml", "[server]\nauth = \"invalid\"\n".bytes(), 0o600)?
+  let assert Err(invalid) = run("vigilo", args.append("invalid.toml"))
+  assert invalid.Error().contains("validate config invalid.toml")
   Ok(())
 }
 
 #[test]
-fn config_check_help_lists_path_sources() {
-  let assert Ok(Some(help)) = run("vigilo", ["config", "check", "--help"])
-  assert help.contains(
-    "[path], then VIGILO_CONFIG_PATH, then /etc/vigilo/vigilo.toml",
-  )
+fn help_lists_immediate_commands_and_keeps_lookup_order_on_leaves() {
+  let assert Ok(Some(root)) = run("vigilo", ["--help"])
+  assert root.contains("  config  Manage configuration")
+  assert root.contains("  server  Start the Vigilo server")
+  assert !root.contains("  check ")
+  assert !root.contains("VIGILO_CONFIG_PATH")
+  assert root.contains("vigilo <command> --help")
+
+  let assert Ok(Some(group)) = run("vigilo", ["config", "--help"])
+  assert group.contains("  check  Validate a configuration file")
+  assert !group.contains("VIGILO_CONFIG_PATH")
+  assert group.contains("vigilo config <command> --help")
+
+  let lookup = "[path], then nonempty VIGILO_CONFIG_PATH, then /etc/vigilo/vigilo.toml"
+  let assert Ok(Some(check)) = run("vigilo", ["config", "check", "--help"])
+  let assert Ok(Some(server)) = run("vigilo", ["server", "--help"])
+  assert check.contains(lookup)
+  assert server.contains(lookup)
 }

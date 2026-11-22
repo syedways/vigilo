@@ -15,6 +15,18 @@ mise install
 mise run dev
 ```
 
+Open <http://127.0.0.1:8080/> once Vigilo is listening. The default
+[`vigilo.dev.toml`](vigilo.dev.toml) uses loopback HTTP with no authentication
+or checks.
+
+Use `mise run dev <path>` with an absolute or checkout-relative config path.
+For configs with checks, set `server.storage.path` to an absolute, writable
+location. The watcher reloads on changes to the config, `lisette.toml`, or
+Lisette sources.
+
+For one-off commands, use `mise run vigilo --help` or
+`mise run vigilo config check path/to/vigilo.toml`.
+
 List development tasks with `mise tasks`. Git hooks are installed automatically.
 
 ### Preview the docs
