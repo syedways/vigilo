@@ -104,7 +104,7 @@ describe("Server integration", () => {
     });
   }, testTimeoutMs);
 
-  it("keeps health public and challenges requests without valid credentials", async () => {
+  it("serves the overview after authentication and keeps health public", async () => {
     await using fixture = await mkdtempDisposable(fixturePrefix);
     const password = "integration-test-password";
     const passwordPath = join(fixture.path, "admin-password");
@@ -119,17 +119,22 @@ describe("Server integration", () => {
       const cases = [
         { name: "no credentials", supplied: undefined, status: 401 },
         { name: "wrong password", supplied: "wrong", status: 401 },
-        { name: "correct password", supplied: password, status: 404 },
+        { name: "correct password", supplied: password, status: 200 },
       ];
       for (const { name, supplied, status } of cases) {
         const headers = new Headers();
         if (supplied !== undefined) {
           headers.set("authorization", `Basic ${btoa(`admin:${supplied}`)}`);
         }
-        const response = await request(address, "/unknown", { headers });
+        const response = await request(address, "/", { headers });
         expect(response.status, name).toBe(status);
         if (status === 401) {
           expect(response.headers.get("www-authenticate"), name).toMatch(/^Basic\b/);
+        } else {
+          expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+          expect(response.body).toContain("<h1>Server overview</h1>");
+          expect(response.body).toContain("<dt>Uptime</dt>");
+          expect(response.body).toMatch(/datetime='\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'/);
         }
       }
     });
