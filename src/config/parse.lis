@@ -27,7 +27,11 @@ struct ServerInput {
   storage: StorageInput,
   admin: AdminInput,
   tls: TlsInput,
+  checks: Map<string, CheckInput>,
 }
+
+#[toml]
+struct CheckInput { url: string, interval: string }
 
 #[toml]
 struct TlsInput { certificate_file: string, key_file: string }
@@ -153,7 +157,17 @@ fn validate_server(
   } else {
     None
   }
-  let settings = server.Config { listen: input.listen, storage_path, auth, tls }
+  let mut checks = Map.new<string, server.HttpCheck>()
+  for (name, check) in input.checks {
+    checks[name] = server.parse_http_check(name, check.url, check.interval)?
+  }
+  let settings = server.Config {
+    listen: input.listen,
+    storage_path,
+    auth,
+    tls,
+    checks,
+  }
   server.validate_endpoint(settings)?
   Ok(settings)
 }

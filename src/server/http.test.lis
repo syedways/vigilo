@@ -15,6 +15,7 @@ fn invalid_tls_files_fail_server_startup() -> Result<(), error> {
     storage_path: filepath.Join(dir, "state.db"),
     auth: AuthConfig.Disabled,
     tls: Some(TlsFiles { certificate_file, key_file }),
+    ..,
   }
   let assert Err(missing) = run(context.Background(), settings, "")
   assert missing.Error().contains("load server TLS certificate and key")

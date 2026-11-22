@@ -1,11 +1,15 @@
 import "go:context"
 import "go:crypto/tls"
+import "go:encoding/json"
 import "go:errors"
 import "go:fmt"
+import "go:html/template"
 import "go:net"
 import "go:net/http"
 import "go:strings"
 import "go:time"
+
+import "storage"
 
 pub fn run(
   ctx: context.Context,
@@ -30,31 +34,59 @@ pub fn run(
     },
     None => None,
   }
-  let listener = net.Listen("tcp", settings.listen).wrap_err("listen")?
-  defer listener.Close()
-  match tls_settings {
-    Some(config) => serve_http(
-      ctx,
-      tls.NewListener(listener, &config),
-      auth,
-      "https",
-    ),
-    None => serve_http(ctx, listener, auth, "http"),
+  let socket = net.Listen("tcp", settings.listen).wrap_err("listen")?
+  defer socket.Close()
+  let (listener, scheme) = tls_settings.map_or((socket, "http"), |config| {
+    (tls.NewListener(socket, &config), "https")
+  })
+  let mut handler = new_handler(auth)?
+  let checks = settings.checks
+  if checks.is_empty() { return serve_http(ctx, listener, handler, scheme) }
+
+  let mut db = storage
+    .open(settings.storage_path)
+    .wrap_err("open check history")?
+  defer db.Close()
+  let (checks_ctx, stop_checks) = context.WithCancel(ctx)
+  let finished = Channel.buffered<()>(checks.length())
+  defer {
+    // wait for every worker before closing the database.
+    stop_checks()
+    for _ in 0..checks.length() {
+      let _ = finished.receive()
+    }
   }
+  for (name, check) in checks {
+    task {
+      run_check(checks_ctx, db, name, check)
+      let _ = finished.send(())
+    }
+  }
+  handler.history = Some(
+    History {
+      recent: |request_ctx, name, limit| storage.recent(
+        db,
+        request_ctx,
+        name,
+        limit,
+      ),
+      checks,
+    },
+  )
+  serve_http(ctx, listener, handler, scheme)
 }
 
 fn serve_http(
   ctx: context.Context,
   listener: net.Listener,
-  auth: Auth,
+  handler: Handler,
   scheme: string,
 ) -> Result<(), error> {
   let Some(address) = listener.Addr() else {
     return Err(errors.New("listener has no address"))
   }
-  let overview = new_overview(time.Now())?
   let mut server = http.Server {
-    Handler: Some(Handler { auth, overview }),
+    Handler: Some(handler),
     ReadHeaderTimeout: 5 * time.Second,
     ReadTimeout: 10 * time.Second,
     WriteTimeout: 10 * time.Second,
@@ -97,7 +129,23 @@ fn serve_http(
   }
 }
 
-struct Handler { auth: Auth, overview: Overview }
+struct Handler {
+  auth: Auth,
+  overview: Overview,
+  checks_page: Ref<template.Template>,
+  history: Option<History>,
+}
+
+struct History {
+  recent: fn(context.Context, string, int) -> Result<Slice<storage.Sample>, error>,
+  checks: Map<string, HttpCheck>,
+}
+
+fn new_handler(auth: Auth) -> Result<Handler, error> {
+  let overview = new_overview(time.Now())?
+  let checks_page = parse_page(CHECKS_CONTENT)?
+  Ok(Handler { auth, overview, checks_page, history: None })
+}
 
 impl Handler {
   fn ServeHTTP(
@@ -115,31 +163,79 @@ impl Handler {
       http.NotFound(response, request)
       return
     }
-    if url.Path != "/healthz" {
-      if !permits(self.auth, request) {
-        response
-          .Header()
-          .Set("WWW-Authenticate", "Basic realm=\"Vigilo\", charset=\"UTF-8\"")
-        http.Error(response, "unauthorized", http.StatusUnauthorized)
-        return
-      }
-      if url.Path != "/" {
-        http.NotFound(response, request)
-        return
-      }
-    }
-    if request.Method != "GET" {
-      response.Header().Set("Allow", "GET")
-      http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+    if url.Path != "/healthz" && !permits(self.auth, request) {
+      response
+        .Header()
+        .Set("WWW-Authenticate", "Basic realm=\"Vigilo\", charset=\"UTF-8\"")
+      http.Error(response, "unauthorized", http.StatusUnauthorized)
       return
     }
-    if url.Path == "/" {
-      serve_overview(self.overview, response)
-      return
+    match url.Path {
+      "/" => {
+        if allow_get(response, request.Method) {
+          serve_overview(self.overview, response)
+        }
+      },
+      "/checks" => {
+        if allow_get(response, request.Method) {
+          let name = url.Query().Get("check")
+          serve_checks(self.checks_page, self.history, response, request, name)
+        }
+      },
+      "/healthz" => {
+        if allow_get(response, request.Method) {
+          response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+          let _ = fmt.Fprintln(response, "ok")
+        }
+      },
+      _ => {
+        let Some(history) = self.history else {
+          http.NotFound(response, request)
+          return
+        }
+        serve_history(history, response, request, url.Path)
+      },
     }
-    response.Header().Set("Content-Type", "text/plain; charset=utf-8")
-    let _ = fmt.Fprintln(response, "ok")
   }
+}
+
+fn allow_get(response: http.ResponseWriter, method: string) -> bool {
+  if method == "GET" { return true }
+  response.Header().Set("Allow", "GET")
+  http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+  false
+}
+
+fn serve_history(
+  history: History,
+  response: http.ResponseWriter,
+  request: mut Ref<http.Request>,
+  path: string,
+) {
+  let ["", "api", "checks", name, "history"] = strings.Split(path, "/") else {
+    http.NotFound(response, request)
+    return
+  }
+  if history.checks.get(name).is_none() {
+    http.NotFound(response, request)
+    return
+  }
+  if !allow_get(response, request.Method) { return }
+  let Ok(samples) = (history.recent)(
+    request.Context(),
+    name,
+    storage.HISTORY_LIMIT,
+  ) else {
+    http.Error(
+      response,
+      "check history unavailable",
+      http.StatusServiceUnavailable,
+    )
+    return
+  }
+  response.Header().Set("Content-Type", "application/json")
+  response.Header().Set("Cache-Control", "no-store")
+  let _ = json.NewEncoder(response).Encode(samples)
 }
 
 fn is_loopback_host(authority: string) -> bool {

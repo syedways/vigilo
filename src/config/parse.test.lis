@@ -250,6 +250,34 @@ fn tls_allows_remote_password_auth_and_requires_both_paths() {
 }
 
 #[test]
+fn http_checks_accept_named_tables_and_reject_invalid_settings() {
+  let config = "[server]\nauth = 'none'\n[server.checks.site]\n"
+  let assert Ok(Config.Server(settings)) = parse(
+    f"{config}url = 'https://example.test/health'\ninterval = '30s'\n[server.checks.other-site]\nurl = 'http://127.0.0.1:8080/'\n".bytes(),
+  )
+  assert settings.checks.length() == 2
+  assert settings.checks.get("site").is_some()
+  assert settings.checks.get("other-site").is_some()
+
+  for settings in [
+    "",
+    "url = 'ftp://example.test/'\n",
+    "url = 'http:///health'\n",
+    "url = 'http://user:example-secret@example.test/'\n",
+    "url = 'https://example.test/#health'\n",
+    "url = 'https://example.test/'\ninterval = '500ms'\n",
+    "url = 'https://example.test/'\ninterval = 'tomorrow'\n",
+    "url = 'https://example.test/'\nInterval = '1m'\n",
+  ] {
+    let assert Err(err) = parse(f"{config}{settings}".bytes())
+    assert !err.Error().contains("example-secret")
+  }
+  assert parse(
+    "[server]\nauth = 'none'\n[server.checks.'bad/name']\nurl = 'http://example.test/'\n".bytes(),
+  ).is_err()
+}
+
+#[test]
 fn loading_config_never_reads_secrets_or_creates_state() -> Result<(), error> {
   let dir = os.MkdirTemp("", "vigilo-config-")?
   defer {

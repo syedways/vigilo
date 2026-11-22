@@ -1,0 +1,146 @@
+import "go:context"
+import "go:html/template"
+import "go:maps"
+import "go:net/http"
+import "go:slices"
+import "go:time"
+
+import "storage"
+
+const CHECKS_CONTENT = "{{define \"content\"}}
+<h1>Checks</h1>
+{{if .Checks}}
+  <div class='table-scroll'>
+    <table>
+      <thead>
+        <tr>
+          <th scope='col'>Check</th>
+          <th scope='col'>Latest result</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Checks}}
+        <tr>
+          <th scope='row'>
+            <a href='/checks?check={{.Name}}'{{if eq .Name $.Selected}} aria-current='true'{{end}}>{{.Name}}</a>
+          </th>
+          <td>{{.Outcome}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  <h2>History for {{.Selected}}</h2>
+  {{if .Samples}}
+    <div class='table-scroll'>
+      <table>
+        <thead>
+          <tr>
+            <th scope='col'>Time (UTC)</th>
+            <th scope='col'>Result</th>
+            <th scope='col'>HTTP status</th>
+            <th scope='col'>Duration</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Samples}}
+          <tr>
+            <td><time datetime='{{.CheckedAt}}'>{{.CheckedAt}}</time></td>
+            <td>{{.Outcome}}</td>
+            <td>{{if .StatusCode}}{{.StatusCode}}{{else}}&mdash;{{end}}</td>
+            <td>{{.DurationMs}} ms</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  {{else}}
+    <p>No results yet.</p>
+  {{end}}
+{{else}}
+  <p>No HTTP checks configured.</p>
+{{end}}
+{{end}}"
+
+pub struct ChecksPage {
+  pub title: string,
+  pub checks: Slice<CheckSummary>,
+  pub selected: string,
+  pub samples: Slice<CheckReading>,
+}
+
+pub struct CheckSummary {
+  pub name: string,
+  pub outcome: string,
+}
+
+pub struct CheckReading {
+  pub checked_at: string,
+  pub outcome: string,
+  pub status_code: int,
+  pub duration_ms: int64,
+}
+
+fn serve_checks(
+  page: Ref<template.Template>,
+  history: Option<History>,
+  response: http.ResponseWriter,
+  request: Ref<http.Request>,
+  name: string,
+) {
+  let Some(history) = history else {
+    render_page(page, response, ChecksPage { title: "Checks", .. })
+    return
+  }
+  if name != "" && history.checks.get(name).is_none() {
+    http.NotFound(response, request)
+    return
+  }
+  let Ok(data) = checks_page_data(history, request.Context(), name) else {
+    http.Error(
+      response,
+      "check history unavailable",
+      http.StatusServiceUnavailable,
+    )
+    return
+  }
+  render_page(page, response, data)
+}
+
+fn checks_page_data(
+  history: History,
+  ctx: context.Context,
+  name: string,
+) -> Result<ChecksPage, error> {
+  let names = slices.Sorted(maps.Keys(history.checks))
+  let selected = if name == "" { names.get(0).unwrap_or("") } else { name }
+  let samples = (history.recent)(ctx, selected, storage.HISTORY_LIMIT)?
+  let mut checks = Slice.new<CheckSummary>()
+  for check in names {
+    let latest = if check == selected {
+      samples.get(0)
+    } else {
+      (history.recent)(ctx, check, 1)?.get(0)
+    }
+    let outcome = latest.map_or("Pending", |sample| outcome_label(
+      sample.outcome,
+    ))
+    checks = checks.append(CheckSummary { name: check, outcome })
+  }
+  let readings = samples.map(|sample| CheckReading {
+    checked_at: time.UnixMilli(sample.checked_at_ms).UTC().Format(time.RFC3339),
+    outcome: outcome_label(sample.outcome),
+    status_code: sample.status_code,
+    duration_ms: sample.duration_ms,
+  })
+  Ok(ChecksPage { title: "Checks", checks, selected, samples: readings })
+}
+
+fn outcome_label(outcome: string) -> string {
+  match outcome {
+    "up" => "Up",
+    "down" => "Down",
+    "timeout" => "Timed out",
+    _ => "Error",
+  }
+}

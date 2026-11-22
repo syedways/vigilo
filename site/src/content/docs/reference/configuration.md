@@ -120,6 +120,29 @@ Start the server with `vigilo server`, which uses the same config path
 precedence. At startup, Vigilo checks the password and loads the configured
 TLS pair before opening the listener.
 
+## Monitor an HTTP endpoint
+
+Add a named check to your server configuration. Vigilo probes the URL when the
+server starts and waits for the configured interval between attempts.
+
+```toml title="/etc/vigilo/vigilo.toml"
+[server.checks.homepage]
+url = "https://example.com/"
+interval = "1m"
+```
+
+The database opens when at least one check is configured. Create the parent
+directory for `server.storage.path` and give the Vigilo user read and write access
+to it. Keep that directory private to the service user.
+
+Open Vigilo in your browser and select **Checks** to see each check's latest
+result. Select a check to see its recent history.
+
+Vigilo records `up` for HTTP 2xx, `down` for other HTTP statuses, `timeout` when
+the five-second deadline expires, and `error` for other request failures.
+Checks do not follow redirects. Results older than seven days are removed as
+new results are recorded.
+
 ## All settings
 
 ### Server
@@ -130,7 +153,9 @@ TLS pair before opening the listener.
 | `server.auth` | `"password"` | `"password"` for one configured admin, or `"none"` to disable built-in authentication |
 | `server.tls.certificate_file` | None | Absolute path to the PEM certificate chain. Required if `server.tls` is present. |
 | `server.tls.key_file` | None | Absolute path to the matching PEM private key. Required if `server.tls` is present. |
-| `server.storage.path` | `"/var/lib/vigilo/vigilo.db"` | Absolute database path. Reserved for persistent check history. |
+| `server.storage.path` | `"/var/lib/vigilo/vigilo.db"` | Absolute SQLite database path for check history. |
+| `server.checks.<name>.url` | Required for each check | HTTP or HTTPS URL without credentials or a fragment. Names use lowercase ASCII letters, digits, hyphens, or underscores. |
+| `server.checks.<name>.interval` | `"1m"` | A duration of at least one second, such as `"30s"` or `"5m"`. |
 | `server.admin.username` | Required in password mode | Username on a single line without a colon |
 | `server.admin.password_file` | None | Absolute password file path |
 | `server.admin.password_credential` | None | Credential name containing ASCII letters, digits, dots, underscores, or hyphens. `.` and `..` are invalid. |
@@ -142,8 +167,7 @@ password, replace the secret and restart Vigilo.
 
 The server uses HTTP Basic authentication in password mode. For remote
 access, configure HTTPS directly in Vigilo or use an HTTPS reverse proxy
-in front of its loopback listener. `GET /healthz` is available without
-credentials in either mode.
+in front of its loopback listener.
 
 ### Agent
 

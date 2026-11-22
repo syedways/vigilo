@@ -1,14 +1,56 @@
 import "go:errors"
 import "go:net"
 import "go:net/netip"
+import "go:net/url"
 import "go:strconv"
 import "go:strings"
+import "go:time"
 
 pub struct Config {
   pub listen: string,
   pub storage_path: string,
   pub auth: AuthConfig,
   pub tls: Option<TlsFiles>,
+  pub checks: Map<string, HttpCheck>,
+}
+
+pub struct HttpCheck { url: string, interval: time.Duration }
+
+pub fn parse_http_check(
+  name: string,
+  endpoint: string,
+  interval: string,
+) -> Result<HttpCheck, error> {
+  let invalid_name_char = strings.ContainsFunc(name, |ch| {
+    let letter = ch >= 'a' && ch <= 'z'
+    let digit = ch >= '0' && ch <= '9'
+    !(letter || digit || ch == '-' || ch == '_')
+  })
+  if name.is_empty() || invalid_name_char {
+    return Err(errors.New(
+      "check names must contain only lowercase ASCII letters, digits, hyphens, or underscores",
+    ))
+  }
+  let parsed = url
+    .Parse(endpoint)
+    .map_err(|_| errors.New("check URL must be a valid HTTP or HTTPS URL"))?
+  let http_scheme = parsed.Scheme == "http" || parsed.Scheme == "https"
+  if !http_scheme || parsed.Hostname().is_empty() || parsed.User.is_some() || parsed.Fragment != "" {
+    return Err(errors.New(
+      "check URL requires an HTTP or HTTPS host and must omit credentials and fragments",
+    ))
+  }
+  let delay = if interval == "" {
+    time.Minute
+  } else {
+    time
+      .ParseDuration(interval)
+      .map_err(|_| errors.New("check interval must be a duration such as 1m"))?
+  }
+  if delay < time.Second {
+    return Err(errors.New("check interval must be at least 1s"))
+  }
+  Ok(HttpCheck { url: parsed.String(), interval: delay })
 }
 
 pub struct TlsFiles {

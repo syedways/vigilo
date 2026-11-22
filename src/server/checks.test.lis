@@ -1,0 +1,52 @@
+import "go:context"
+import "go:net/http"
+import "go:time"
+
+struct ProbeEndpoint { status: Option<int> }
+
+impl ProbeEndpoint {
+  fn RoundTrip(
+    self,
+    request: Ref<http.Request>,
+  ) -> Result<mut Ref<http.Response>, error> {
+    if let Some(status) = self.status {
+      return Ok(&http.Response { StatusCode: status, .. })
+    }
+    let _ = request.Context().Done().receive()
+    let Some(err) = request.Context().Err() else {
+      return Err(context.Canceled)
+    }
+    Err(err)
+  }
+}
+
+#[test]
+fn classifies_timeout_without_an_http_status() {
+  let client = http.Client {
+    Transport: Some(ProbeEndpoint { status: None }),
+    Timeout: time.Millisecond,
+    ..,
+  }
+  let (outcome, status) = probe(
+    context.Background(),
+    &client,
+    "http://example.test",
+  )
+  assert outcome == "timeout"
+  assert status == 0
+}
+
+#[test]
+fn records_an_out_of_range_status_as_a_request_error() {
+  let client = http.Client {
+    Transport: Some(ProbeEndpoint { status: Some(99) }),
+    ..,
+  }
+  let (outcome, status) = probe(
+    context.Background(),
+    &client,
+    "http://example.test",
+  )
+  assert outcome == "error"
+  assert status == 0
+}

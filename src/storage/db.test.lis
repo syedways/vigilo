@@ -1,0 +1,203 @@
+import "go:context"
+import "go:database/sql"
+import "go:os"
+import "go:path/filepath"
+import "go:runtime"
+import "go:strings"
+import "go:time"
+
+#[test]
+fn disk_database_configures_every_connection() -> Result<(), error> {
+  let dir = os.MkdirTemp("", "vigilo-db-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let path = filepath.Join(dir, "state?mode=memory#literal.db")
+  let mut db = open(path)?
+  defer db.Close()
+  assert db.Stats().MaxOpenConnections == 1
+  let mut sample_count = 0
+  db.QueryRow("SELECT count(*) FROM check_results").Scan(&sample_count)?
+  assert sample_count == 0
+  for suffix in ["", "-wal", "-shm"] {
+    let info = os.Stat(f"{path}{suffix}")?
+    if runtime.GOOS != "windows" { assert info.Mode().Perm() == 0o600 }
+  }
+  for _ in 0..2 {
+    let mut mode = ""
+    db.QueryRow("PRAGMA journal_mode").Scan(&mode)?
+    assert mode == "wal"
+    for (pragma, expected) in [
+      ("synchronous", 2),
+      ("trusted_schema", 0),
+      ("foreign_keys", 1),
+      ("busy_timeout", 5000),
+      ("wal_autocheckpoint", 1000),
+      ("user_version", 1),
+    ] {
+      let mut actual = 0
+      db.QueryRow(f"PRAGMA {pragma}").Scan(&actual)?
+      assert actual == expected
+    }
+    db.SetMaxIdleConns(0)
+  }
+  Ok(())
+}
+
+#[test]
+fn migrations_are_idempotent_and_preserve_data() -> Result<(), error> {
+  let dir = os.MkdirTemp("", "vigilo-migrations-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let path = filepath.Join(dir, "state.db")
+  let mut db = open(path)?
+  let now = time.Now().UnixMilli()
+  record(
+    db,
+    context.Background(),
+    "site",
+    Sample {
+      checked_at_ms: now,
+      duration_ms: 12,
+      outcome: "up",
+      status_code: 200,
+    },
+  )?
+  migrate(db)?
+  db.Close()?
+  let mut reopened = open(path)?
+  defer reopened.Close()
+  let history = recent(reopened, context.Background(), "site", HISTORY_LIMIT)?
+  let assert [sample] = history
+  assert sample.checked_at_ms == now
+  assert sample.status_code == 200
+  Ok(())
+}
+
+#[test]
+fn recent_history_is_bounded_and_expired_results_are_pruned() -> Result<(), error> {
+  let dir = os.MkdirTemp("", "vigilo-history-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let mut db = open(filepath.Join(dir, "state.db"))?
+  defer db.Close()
+  let ctx = context.Background()
+  let now = time.Now()
+  record(
+    db,
+    ctx,
+    "site",
+    Sample {
+      checked_at_ms: now.Add(-8 * 24 * time.Hour).UnixMilli(),
+      duration_ms: 2,
+      outcome: "down",
+      status_code: 503,
+    },
+  )?
+  for index in 0..(HISTORY_LIMIT + 1) {
+    record(
+      db,
+      ctx,
+      "site",
+      Sample {
+        checked_at_ms: now.UnixMilli(),
+        duration_ms: index as int64,
+        outcome: "up",
+        status_code: 200,
+      },
+    )?
+  }
+  let history = recent(db, ctx, "site", HISTORY_LIMIT)?
+  let assert Some(latest) = history.get(0)
+  assert latest.duration_ms == HISTORY_LIMIT as int64
+  assert history.length() == HISTORY_LIMIT
+  let other = recent(db, ctx, "other", HISTORY_LIMIT)?
+  assert other.is_empty()
+  let mut expired = 0
+  db
+    .QueryRow("SELECT count(*) FROM check_results WHERE outcome = 'down'")
+    .Scan(&expired)?
+  assert expired == 0
+  Ok(())
+}
+
+#[test]
+fn failed_migration_rolls_back_schema_and_version() -> Result<(), error> {
+  let dir = os.MkdirTemp("", "vigilo-rollback-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let path = filepath.Join(dir, "state.db")
+  let mut db = sql.Open("sqlite", path)?
+  defer db.Close()
+  let _ = db.Exec("CREATE TABLE other (name TEXT)")?
+  let _ = db.Exec("CREATE INDEX check_results_history ON other(name)")?
+  let assert Err(_) = migrate(db)
+  let mut version = 0
+  db.QueryRow("PRAGMA user_version").Scan(&version)?
+  assert version == 0
+  let mut count = 0
+  db
+    .QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'check_results'")
+    .Scan(&count)?
+  assert count == 0
+  Ok(())
+}
+
+#[test]
+fn invalid_database_paths_fail() -> Result<(), error> {
+  let assert Err(_) = open("relative.db")
+  let dir = os.MkdirTemp("", "vigilo-unwritable-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let assert Err(_) = open(filepath.Join(dir, "missing", "state.db"))
+  let assert Err(_) = open(dir)
+  Ok(())
+}
+
+#[test]
+fn database_rejects_public_files_and_sidecars() -> Result<(), error> {
+  if runtime.GOOS == "windows" { return Ok(()) }
+  let dir = os.MkdirTemp("", "vigilo-public-db-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let path = filepath.Join(dir, "state.db")
+  os.WriteFile(path, [], 0o600)?
+  os.Chmod(path, 0o640)?
+  let assert Err(err) = open(path)
+  assert strings.Contains(err.Error(), "group and other permissions")
+  os.Chmod(path, 0o600)?
+  os.WriteFile(f"{path}-wal", [], 0o600)?
+  os.Chmod(f"{path}-wal", 0o644)?
+  let assert Err(err) = open(path)
+  assert strings.Contains(err.Error(), "SQLite -wal file")
+  assert strings.Contains(err.Error(), "group and other permissions")
+  Ok(())
+}
+
+#[test]
+fn database_rejects_symlinks_to_files() -> Result<(), error> {
+  if runtime.GOOS == "windows" { return Ok(()) }
+  let dir = os.MkdirTemp("", "vigilo-linked-db-")?
+  defer {
+    let _ = os.RemoveAll(dir)
+  }
+  let path = filepath.Join(dir, "state.db")
+  let other = filepath.Join(dir, "other.db")
+  os.WriteFile(other, [], 0o600)?
+  os.Symlink(other, path)?
+  let assert Err(err) = open(path)
+  assert strings.Contains(err.Error(), "expected a regular file")
+  os.Remove(path)?
+  os.Symlink(other, f"{path}-wal")?
+  let assert Err(err) = open(path)
+  assert strings.Contains(err.Error(), "SQLite -wal file")
+  let assert Err(_) = os.Stat(path)
+  let contents = os.ReadFile(other)?
+  assert contents.is_empty()
+  Ok(())
+}
