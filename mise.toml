@@ -121,12 +121,12 @@ exec aube run --no-install "$script" -- "$@"
 [tasks."docs:install"]
 description = "Install docs dependencies from the lockfile"
 dir = "site"
-run = "aube ci --ignore-scripts --disable-global-virtual-store"
+run = "aube install --frozen-lockfile --ignore-scripts --disable-global-virtual-store"
 
 [tasks."docs:preview"]
 description = "Install locked dependencies and start the local docs preview"
 depends = ["docs:install"]
 run = [
-  "aube -C site/deploy ci --ignore-scripts",
+  "aube -C site/deploy install --frozen-lockfile --ignore-scripts",
   "aube -C site run --no-install preview",
 ]

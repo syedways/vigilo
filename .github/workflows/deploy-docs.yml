@@ -54,7 +54,7 @@ jobs:
           add_shims_to_path: false
 
       - name: Install dependencies
-        run: mise run docs:install
+        run: mise exec -- aube -C site ci --ignore-scripts --disable-global-virtual-store
 
       - name: Build the site
         run: mise run docs build
