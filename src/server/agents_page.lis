@@ -1,0 +1,67 @@
+import "go:html/template"
+import "go:net/http"
+import "go:time"
+
+const AGENTS_CONTENT = "{{define \"content\"}}
+<h1>Agents</h1>
+{{if .Agents}}
+<div class='table-scroll'>
+<table>
+  <thead><tr><th scope='col'>Machine</th><th scope='col'>Status</th><th scope='col'>Last contact (UTC)</th></tr></thead>
+  <tbody>{{range .Agents}}
+    <tr><th scope='row'>{{.Name}}</th><td>{{.Status}}</td><td>{{if .Contact}}<time datetime='{{.Contact}}'>{{.Contact}}</time>{{else}}&mdash;{{end}}</td></tr>
+  {{end}}</tbody>
+</table>
+</div>
+{{else}}<p>No agents configured.</p>{{end}}
+{{end}}"
+
+pub struct AgentsPage {
+  pub title: string,
+  pub agents: Slice<AgentRow>,
+}
+
+pub struct AgentRow {
+  pub name: string,
+  pub status: string,
+  pub contact: string,
+}
+
+fn agent_row(
+  name: string,
+  contact: Option<time.Time>,
+  now: time.Time,
+) -> AgentRow {
+  let Some(last) = contact else {
+    return AgentRow { name, status: "Never seen", contact: "" }
+  }
+  let age = now.Sub(last)
+  let status = if age >= 0 && age <= 90 * time.Second {
+    "Online"
+  } else {
+    "Offline"
+  }
+  AgentRow { name, status, contact: last.UTC().Format(time.RFC3339) }
+}
+
+fn serve_agents(
+  page: Ref<template.Template>,
+  agents: Option<Agents>,
+  response: http.ResponseWriter,
+  request: Ref<http.Request>,
+) {
+  let mut rows: Slice<AgentRow> = []
+  if let Some(configured) = agents {
+    let Ok(contacts) = (configured.contacts)(request.Context()) else {
+      http.Error(
+        response,
+        "agent contacts unavailable",
+        http.StatusServiceUnavailable,
+      )
+      return
+    }
+    let now = time.Now()
+    rows = configured.names.map(|name| agent_row(name, contacts.get(name), now))
+  }
+  render_page(page, response, AgentsPage { title: "Agents", agents: rows })
+}

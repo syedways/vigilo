@@ -96,16 +96,16 @@ description = "Run the Lisette test suite"
 run = "lis test"
 
 [tasks."test:integration"]
-description = "Build Vigilo and run the server integration tests"
+description = "Build Vigilo and run the server and agent integration tests"
 depends = ["build"]
-run = "bun test ./tests/server.integration.test.ts"
+run = "bun test ./tests/server.integration.test.ts ./tests/agent.integration.test.ts"
 
 [tasks.sync]
 description = "Reconcile dependencies with Go imports"
 run = "lis sync"
 
 [tasks.verify]
-description = "Run lint, Lisette tests, and server integration tests in sequence"
+description = "Run lint, Lisette tests, and application integration tests in sequence"
 run = [{ task = "lint" }, { task = "test" }, { task = "test:integration" }]
 
 [tasks.docs]

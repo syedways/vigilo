@@ -2,74 +2,9 @@ import { $ } from "bun";
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { chmod, mkdtempDisposable } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const binary = join(import.meta.dir, "../target/.lisette/bin/vigilo");
-const fixturePrefix = join(tmpdir(), "vigilo-integration-");
-const testTimeoutMs = 12_000;
-const requestTimeoutMs = 2_000;
-const readinessLine = /^server: listening on (https?:\/\/127\.0\.0\.1:\d+)\r?\n/m;
-const processOptions = { env: {}, stderr: "pipe", timeout: 8_000, killSignal: "SIGKILL" } as const;
-
-function runVigilo(args: string[], expectedCode = 0) {
-  const { exitCode, signalCode, stdout, stderr } = Bun.spawnSync([binary, ...args], processOptions);
-  const error = stderr.toString();
-  expect(exitCode, signalCode ? `vigilo received ${signalCode}: ${error}` : error).toBe(expectedCode);
-  return { stdout: stdout.toString(), stderr: error };
-}
-
-async function checkServer(
-  configPath: string,
-  signal: "SIGTERM" | "SIGINT",
-  check?: (address: string) => Promise<void>,
-) {
-  const child = Bun.spawn([binary, "server", configPath], processOptions);
-  const stderr = child.stderr.text();
-  const ready = Promise.withResolvers<string>();
-  let output = "";
-  const stdout = child.stdout.pipeThrough(new TextDecoderStream()).pipeTo(
-    new WritableStream<string>({
-      write(chunk) {
-        output += chunk;
-        const address = readinessLine.exec(output)?.[1];
-        if (address) ready.resolve(address);
-      },
-    }),
-  );
-  try {
-    const address = await Promise.race([ready.promise, stdout.then(() => undefined)]);
-    if (!address) {
-      throw new Error(`server did not announce readiness\n${output}${await stderr}`);
-    }
-
-    await check?.(address);
-    child.kill(signal);
-    const exitCode = await child.exited;
-    expect(exitCode, `server exited on ${signal}: ${await stderr}`).toBe(0);
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
-    }
-    await Promise.all([child.exited, stdout, stderr]);
-  }
-}
-
-async function writeConfig(dir: string, settings: Record<string, unknown>, port = 0) {
-  const path = join(dir, "vigilo.toml");
-  const config = { server: { listen: `127.0.0.1:${port}`, ...settings } };
-  await Bun.write(path, Bun.TOML.stringify(config));
-  return path;
-}
-
-async function request(address: string, path: string, options?: RequestInit) {
-  const response = await fetch(new URL(path, address), {
-    ...options,
-    proxy: false,
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  return { status: response.status, headers: response.headers, body: await response.text() };
-}
+import { checkServer, fixturePrefix, readinessLine, request, runVigilo, testTimeoutMs, writeConfig } from "./fixtures";
 
 describe("Server integration", () => {
   it("advertises the server command syntax", () => {
@@ -146,7 +81,7 @@ describe("Server integration", () => {
     // use the pinned go distribution's certificate generator in the temporary fixture.
     const goRoot = (await $`go env GOROOT`.text()).trim();
     const generator = join(goRoot, "src/crypto/tls/generate_cert.go");
-    await $`go run ${generator} -host 127.0.0.1 -duration 1h -ed25519`.cwd(fixture.path).quiet();
+    await $`CGO_ENABLED=0 go run ${generator} -host 127.0.0.1 -duration 1h -ed25519`.cwd(fixture.path).quiet();
     const certPath = join(fixture.path, "cert.pem");
     const configPath = await writeConfig(fixture.path, {
       auth: "none",
@@ -246,7 +181,7 @@ describe("Server integration", () => {
     const dbPath = join(fixture.path, "checks.db");
     {
       using database = new Database(dbPath);
-      database.run("PRAGMA user_version = 2");
+      database.run("PRAGMA user_version = 3");
     }
     await chmod(dbPath, 0o600);
     const configPath = await writeConfig(fixture.path, {
@@ -256,11 +191,11 @@ describe("Server integration", () => {
     });
 
     const { stdout, stderr } = runVigilo(["server", configPath], 1);
-    expect(stderr).toContain("open check history: database schema is newer");
+    expect(stderr).toContain("open server database: database schema is newer");
     expect(stdout).not.toMatch(readinessLine);
 
     using database = new Database(dbPath, { readonly: true });
-    expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+    expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 3 });
     expect(database.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
     expect(database.query("SELECT name FROM sqlite_schema WHERE type = 'table'").all()).toEqual([]);
   }, testTimeoutMs);

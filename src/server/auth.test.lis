@@ -3,6 +3,8 @@ import "go:net/http/httptest"
 import "go:os"
 import "go:path/filepath"
 
+import "secret"
+
 #[test]
 fn password_auth_loads_once_and_matches_the_exact_secret() -> Result<(), error> {
   let dir = os.MkdirTemp("", "vigilo-admin-auth-")?
@@ -12,7 +14,7 @@ fn password_auth_loads_once_and_matches_the_exact_secret() -> Result<(), error> 
   let path = filepath.Join(dir, "admin-password")
   let config = AuthConfig.Password {
     username: "operator",
-    source: SecretSource.File(path),
+    source: secret.Source.File(path),
   }
   for short in ["12345", "ééééé"] {
     os.WriteFile(path, f"{short}\r\n".bytes(), 0o600)?

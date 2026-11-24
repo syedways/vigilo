@@ -1,0 +1,26 @@
+import "go:time"
+
+#[test]
+fn agent_status_uses_the_ninety_second_boundary() {
+  let contact = time.Date(
+    2026,
+    time.November,
+    23,
+    1,
+    2,
+    3,
+    0,
+    time.FixedZone("PKT", 5 * 3600),
+  )
+  let never = agent_row("web", None, contact)
+  assert never.status == "Never seen"
+  assert never.contact == ""
+  let boundary = contact.Add(90 * time.Second)
+  let online = agent_row("web", Some(contact), boundary)
+  assert online.status == "Online"
+  assert online.contact == "2026-11-22T20:02:03Z"
+  let offline = agent_row("web", Some(contact), boundary.Add(time.Nanosecond))
+  assert offline.status == "Offline"
+  let clock_behind = agent_row("web", Some(contact), contact.Add(-time.Second))
+  assert clock_behind.status == "Offline"
+}

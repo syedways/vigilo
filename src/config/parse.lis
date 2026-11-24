@@ -1,10 +1,10 @@
 import "go:bytes"
 import "go:errors"
 import "go:github.com/pelletier/go-toml/v2"
-import "go:path/filepath"
 import "go:strings"
 
 import "agent"
+import "secret"
 import "server"
 
 const DEFAULT_LISTEN = "127.0.0.1:8080"
@@ -28,6 +28,7 @@ struct ServerInput {
   admin: AdminInput,
   tls: TlsInput,
   checks: Map<string, CheckInput>,
+  agents: Map<string, TokenInput>,
 }
 
 #[toml]
@@ -47,10 +48,18 @@ struct AdminInput {
 }
 
 #[toml]
-struct AgentInput { name: string }
+struct AgentInput {
+  name: string,
+  server_url: string,
+  token_file: string,
+  token_credential: string,
+}
+
+#[toml]
+struct TokenInput { token_file: string, token_credential: string }
 
 fn parse(contents: Slice<byte>) -> Result<Config, error> {
-  // keep exact key spelling and distinguish missing password selectors from empty ones.
+  // keep exact key spelling and distinguish missing secret selectors from empty ones.
   let mut fields = Map.new<string, Unknown>()
   toml
     .Unmarshal(contents, &fields)
@@ -75,16 +84,14 @@ fn parse(contents: Slice<byte>) -> Result<Config, error> {
     .wrap_err("decode config sections")?
   let server_settings = match fields.get("server") {
     Some(value) => {
-      let Some(table) = assert_type<Map<string, Unknown>>(value) else {
-        return Err(errors.New("server must be a table"))
-      }
+      let table = require_table(value, "server must be a table")?
       Some(validate_server(input.server, table).wrap_err("server config")?)
     },
     None => None,
   }
-  let agent_settings = if fields.get("agent").is_some() {
-    validate_name(input.agent.name, "agent.name")?
-    Some(agent.Config { machine_name: input.agent.name })
+  let agent_settings = if let Some(value) = fields.get("agent") {
+    let table = require_table(value, "agent must be a table")?
+    Some(validate_agent(input.agent, table)?)
   } else {
     None
   }
@@ -121,17 +128,38 @@ fn validate_keys(fields: Map<string, Unknown>) -> Result<(), error> {
   Ok(())
 }
 
+fn validate_agent(
+  input: AgentInput,
+  fields: Map<string, Unknown>,
+) -> Result<agent.Config, error> {
+  let machine_name = input.name
+  let has_reporting = ["server_url", "token_file", "token_credential"].any(
+    |key| fields.get(key).is_some(),
+  )
+  if !has_reporting {
+    validate_name(machine_name, "agent.name")?
+    return Ok(agent.Config { machine_name, reporting: None })
+  }
+  agent.validate_name(machine_name).wrap_err("agent.name")?
+  let endpoint = agent.reporting_url(input.server_url)?
+  let token = select_source(fields, "token", "agent.token")?
+  Ok(
+    agent.Config {
+      machine_name,
+      reporting: Some(agent.Reporting { endpoint, token }),
+    },
+  )
+}
+
 fn validate_server(
   input: ServerInput,
   fields: Map<string, Unknown>,
 ) -> Result<server.Config, error> {
   let storage_path = input.storage.path
-  if !filepath.IsAbs(storage_path) || strings.ContainsRune(storage_path, '\0') {
-    return Err(errors.New("storage.path must be an absolute path without NUL"))
-  }
+  secret.validate_absolute_path(storage_path, "storage.path")?
   let auth = match input.auth {
     "password" => {
-      let source = select_password(input.admin, fields)?
+      let source = select_password(fields)?
       let username = input.admin.username
       validate_name(username, "admin.username")?
       if strings.ContainsRune(username, ':') {
@@ -161,41 +189,44 @@ fn validate_server(
   for (name, check) in input.checks {
     checks[name] = server.parse_http_check(name, check.url, check.interval)?
   }
+  let mut agents = Map.new<string, secret.Source>()
+  if let Some(value) = fields.get("agents") {
+    let table = require_table(value, "server.agents must be a table")?
+    for (name, value) in table {
+      agent.validate_name(name).wrap_err("server.agents")?
+      let entry = require_table(value, "agent registration must be a table")?
+      agents[name] = select_source(
+        entry,
+        "token",
+        f"server.agents.{name}.token",
+      )?
+    }
+  }
   let settings = server.Config {
     listen: input.listen,
     storage_path,
     auth,
     tls,
     checks,
+    agents,
   }
   server.validate_endpoint(settings)?
   Ok(settings)
 }
 
-fn select_password(
-  admin: AdminInput,
-  fields: Map<string, Unknown>,
-) -> Result<server.SecretSource, error> {
-  let Some(admin_value) = fields.get("admin") else {
-    return Err(errors.New("admin settings are required"))
-  }
-  let Some(admin_fields) = assert_type<Map<string, Unknown>>(admin_value) else {
-    return Err(errors.New("admin must be a table"))
-  }
-  let password = match (
-    admin_fields.get("password_file"),
-    admin_fields.get("password_credential"),
-  ) {
-    (Some(_), None) => server.SecretSource.File(admin.password_file),
-    (None, Some(_)) => server.SecretSource.Credential(admin.password_credential),
-    (None, None) | (Some(_), Some(_)) => {
-      return Err(errors.New(
-        "admin requires exactly one of password_file or password_credential",
-      ))
-    },
-  }
-  server.validate_password_source(password)?
-  Ok(password)
+fn select_password(fields: Map<string, Unknown>) -> Result<secret.Source, error> {
+  let admin_value = fields
+    .get("admin")
+    .ok_or_else(|| errors.New("admin settings are required"))?
+  let admin_fields = require_table(admin_value, "admin must be a table")?
+  select_source(admin_fields, "password", "admin.password")
+}
+
+fn require_table(
+  value: Unknown,
+  message: string,
+) -> Result<Map<string, Unknown>, error> {
+  assert_type<Map<string, Unknown>>(value).ok_or_else(|| errors.New(message))
 }
 
 fn validate_name(name: string, field: string) -> Result<(), error> {
@@ -205,4 +236,29 @@ fn validate_name(name: string, field: string) -> Result<(), error> {
     ))
   }
   Ok(())
+}
+
+fn select_source(
+  fields: Map<string, Unknown>,
+  key: string,
+  field: string,
+) -> Result<secret.Source, error> {
+  let file_key = f"{key}_file"
+  let credential_key = f"{key}_credential"
+  let (value, make_source) = match (
+    fields.get(file_key),
+    fields.get(credential_key),
+  ) {
+    (Some(value), None) => (value, secret.Source.File),
+    (None, Some(value)) => (value, secret.Source.Credential),
+    _ => return Err(errors.New(
+      f"{field} requires exactly one of {file_key} or {credential_key}",
+    )),
+  }
+  let Some(path) = assert_type<string>(value) else {
+    return Err(errors.New(f"{field} source must be a string"))
+  }
+  let source = make_source(path)
+  secret.validate(source, field)?
+  Ok(source)
 }

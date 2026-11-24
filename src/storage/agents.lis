@@ -1,0 +1,82 @@
+import "go:context"
+import "go:database/sql"
+import "go:time"
+
+pub fn record_contact(
+  db: mut Ref<sql.DB>,
+  ctx: context.Context,
+  name: string,
+  now: fn() -> time.Time,
+) -> Result<(), error> {
+  // sample the wall clock after acquiring the single database connection.
+  let mut conn = db.Conn(ctx)?
+  defer conn.Close()
+  let _ = conn.ExecContext(
+    ctx,
+    "INSERT INTO agent_contacts (name, contacted_at_ns) VALUES (?, ?)
+     ON CONFLICT(name) DO UPDATE SET contacted_at_ns = excluded.contacted_at_ns",
+    name,
+    now().UnixNano(),
+  )?
+  Ok(())
+}
+
+pub fn contacts(
+  db: mut Ref<sql.DB>,
+  ctx: context.Context,
+) -> Result<Map<string, time.Time>, error> {
+  let mut rows = db.QueryContext(
+    ctx,
+    "SELECT name, contacted_at_ns FROM agent_contacts",
+  )?
+  defer rows.Close()
+  let mut latest = Map.new<string, time.Time>()
+  while rows.Next() {
+    let mut name = ""
+    let mut ns: int64 = 0
+    rows.Scan(&name, &ns)?
+    latest[name] = time.Unix(0, ns)
+  }
+  if let Some(err) = rows.Err() { return Err(err) }
+  Ok(latest)
+}
+
+pub fn prune_contacts(
+  db: mut Ref<sql.DB>,
+  ctx: context.Context,
+  keep: Slice<string>,
+) -> Result<(), error> {
+  let mut allowed = Map.new<string, bool>()
+  for name in keep {
+    allowed[name] = true
+  }
+  let mut tx = db.BeginTx(ctx, None)?
+  defer tx.Rollback()
+  let existing = contact_names(tx, ctx)?
+  for name in existing {
+    if allowed.get(name).is_none() {
+      let _ = tx.ExecContext(
+        ctx,
+        "DELETE FROM agent_contacts WHERE name = ?",
+        name,
+      )?
+    }
+  }
+  tx.Commit()
+}
+
+fn contact_names(
+  tx: mut Ref<sql.Tx>,
+  ctx: context.Context,
+) -> Result<Slice<string>, error> {
+  let mut rows = tx.QueryContext(ctx, "SELECT name FROM agent_contacts")?
+  defer rows.Close()
+  let mut names = Slice.new<string>()
+  while rows.Next() {
+    let mut name = ""
+    rows.Scan(&name)?
+    names = names.append(name)
+  }
+  if let Some(err) = rows.Err() { return Err(err) }
+  Ok(names)
+}

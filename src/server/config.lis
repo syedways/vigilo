@@ -6,11 +6,14 @@ import "go:strconv"
 import "go:strings"
 import "go:time"
 
+import "secret"
+
 pub struct Config {
   pub listen: string,
   pub storage_path: string,
   pub auth: AuthConfig,
   pub tls: Option<TlsFiles>,
+  pub agents: Map<string, secret.Source>,
   pub checks: Map<string, HttpCheck>,
 }
 
@@ -21,12 +24,11 @@ pub fn parse_http_check(
   endpoint: string,
   interval: string,
 ) -> Result<HttpCheck, error> {
-  let invalid_name_char = strings.ContainsFunc(name, |ch| {
-    let letter = ch >= 'a' && ch <= 'z'
-    let digit = ch >= '0' && ch <= '9'
-    !(letter || digit || ch == '-' || ch == '_')
-  })
-  if name.is_empty() || invalid_name_char {
+  let allowed = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+  if name.is_empty() || strings.ContainsFunc(name, |ch| !strings.ContainsRune(
+    allowed,
+    ch,
+  )) {
     return Err(errors.New(
       "check names must contain only lowercase ASCII letters, digits, hyphens, or underscores",
     ))
@@ -59,18 +61,18 @@ pub struct TlsFiles {
 }
 
 pub enum AuthConfig {
-  Password { username: string, source: SecretSource },
+  Password { username: string, source: secret.Source },
   Disabled,
 }
 
 pub fn validate_endpoint(settings: Config) -> Result<(), error> {
   validate_listen(settings.listen)?
   if let Some(files) = settings.tls {
-    validate_absolute_path(
+    secret.validate_absolute_path(
       files.certificate_file,
       "server.tls.certificate_file",
     )?
-    validate_absolute_path(files.key_file, "server.tls.key_file")?
+    secret.validate_absolute_path(files.key_file, "server.tls.key_file")?
   }
   let (host, _) = net.SplitHostPort(settings.listen)?
   if is_loopback_ip(host) { return Ok(()) }

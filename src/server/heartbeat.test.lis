@@ -1,0 +1,148 @@
+import "go:context"
+import "go:errors"
+import "go:net/http"
+import "go:net/http/httptest"
+import "go:strings"
+import "go:time"
+
+import "secret"
+
+fn send_heartbeat(
+  agents: Option<Agents>,
+  method: string,
+  auth: string,
+  body: string,
+) -> mut Ref<httptest.ResponseRecorder> {
+  let mut req = httptest.NewRequest(
+    method,
+    "/api/agents/heartbeat",
+    Some(strings.NewReader(body)),
+  )
+  if auth != "" {
+    if let Some(headers) = req.Header {
+      let mut h = headers
+      h.Set("Authorization", auth)
+    }
+  }
+  let mut res = httptest.NewRecorder()
+  serve_heartbeat(agents, res, req)
+  res
+}
+
+#[test]
+fn heartbeat_enforces_method_auth_before_body_and_strict_payload() -> Result<(), error> {
+  let raw_token = strings.Repeat("a", 64)
+  let other_token = strings.Repeat("b", 64)
+  let digest = secret.digest_token(secret.decode_token(raw_token)?)
+  let mut tokens = Map.new<Array<byte, 32>, string>()
+  tokens[digest] = "web"
+
+  let mut recorded: Slice<string> = []
+  let configured = Agents {
+    names: ["web"],
+    tokens,
+    record: |_, name| {
+      recorded = recorded.append(name)
+      Ok(())
+    },
+    contacts: |_| Ok(Map.new<string, time.Time>()),
+  }
+
+  let mut get_res = send_heartbeat(Some(configured), "GET", "", "")
+  assert get_res.Code == http.StatusMethodNotAllowed
+  assert get_res.Header().Get("Allow") == "POST"
+
+  // unauthenticated requests return 401 before body size or JSON parsing.
+  for (agents, auth, body) in [
+    (None, f"Bearer {raw_token}", "{\"name\":\"web\"}"),
+    (Some(configured), "", "{"),
+    (Some(configured), f"Bearer {other_token}", strings.Repeat(" ", 1025)),
+    (Some(configured), "Basic dXNlcjpwYXNz", "{\"name\":\"web\"}"),
+  ] {
+    let mut res = send_heartbeat(agents, "POST", auth, body)
+    assert res.Code == http.StatusUnauthorized
+    assert res.Header().Get("WWW-Authenticate") == "Bearer"
+  }
+
+  // authenticated requests reject malformed or unexpected JSON shapes.
+  for body in [
+    "{\"name\":\"web\",\"extra\":\"1\"}",
+    "{\"NAME\":\"web\"}",
+    "null",
+    "{\"name\":null}",
+    "{\"name\":123}",
+    "{}",
+  ] {
+    let res = send_heartbeat(
+      Some(configured),
+      "POST",
+      f"Bearer {raw_token}",
+      body,
+    )
+    assert res.Code == http.StatusBadRequest
+  }
+
+  // mismatched agent name returns 401.
+  let mut wrong_res = send_heartbeat(
+    Some(configured),
+    "POST",
+    f"Bearer {raw_token}",
+    "{\"name\":\"worker\"}",
+  )
+  assert wrong_res.Code == http.StatusUnauthorized
+  assert wrong_res.Header().Get("WWW-Authenticate") == "Bearer"
+  assert recorded.is_empty()
+
+  // valid authenticated heartbeat records once and returns 204.
+  let valid_res = send_heartbeat(
+    Some(configured),
+    "POST",
+    f"Bearer {raw_token}",
+    "{\"name\":\"web\"}",
+  )
+  assert valid_res.Code == http.StatusNoContent
+  assert recorded.equals(["web"])
+  Ok(())
+}
+
+#[test]
+fn coalesce_records_throttles_per_agent_and_retries_after_errors() {
+  let mut now = time.Unix(1000, 0)
+  let mut fail_next = false
+  let mut writes: Slice<string> = []
+  let limited = coalesce_records(
+    |_, name| {
+      writes = writes.append(name)
+      if fail_next { return Err(errors.New("db busy")) }
+      Ok(())
+    },
+    || now,
+  )
+  let ctx = context.Background()
+
+  assert limited(ctx, "web").is_ok()
+  assert limited(ctx, "web").is_ok()
+  assert writes.equals(["web"])
+
+  // another agent writes independently during web's cooldown.
+  assert limited(ctx, "worker").is_ok()
+  assert writes.equals(["web", "worker"])
+
+  // after cooldown elapses, web writes again.
+  now = now.Add(HEARTBEAT_WRITE_COOLDOWN)
+  assert limited(ctx, "web").is_ok()
+  assert writes.equals(["web", "worker", "web"])
+
+  // failed writes do not trigger cooldown so the next attempt retries immediately.
+  now = now.Add(HEARTBEAT_WRITE_COOLDOWN)
+  fail_next = true
+  assert limited(ctx, "web").is_err()
+  fail_next = false
+  assert limited(ctx, "web").is_ok()
+  assert writes.equals(["web", "worker", "web", "web", "web"])
+
+  // backward clock step does not suppress writes.
+  now = now.Add(-time.Second)
+  assert limited(ctx, "web").is_ok()
+  assert writes.equals(["web", "worker", "web", "web", "web", "web"])
+}

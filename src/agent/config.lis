@@ -1,3 +1,67 @@
+import "go:errors"
+import "go:net/netip"
+import "go:net/url"
+import "go:strconv"
+import "go:strings"
+
+import "secret"
+
+pub const MAX_HEARTBEAT_BYTES = 1024
+
+pub const HEARTBEAT_PATH = "/api/agents/heartbeat"
+
+// the compact heartbeat JSON adds 11 bytes around the ASCII name.
+const MAX_NAME_BYTES: int = MAX_HEARTBEAT_BYTES - 11
+
 pub struct Config {
   pub machine_name: string,
+  pub reporting: Option<Reporting>,
+}
+
+pub struct Reporting {
+  pub endpoint: string,
+  pub token: secret.Source,
+}
+
+pub fn validate_name(name: string) -> Result<(), error> {
+  if name.length() > MAX_NAME_BYTES {
+    return Err(errors.New(f"agent names must be at most {MAX_NAME_BYTES} bytes"))
+  }
+  let allowed = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+  if name.is_empty() || strings.ContainsFunc(name, |ch| !strings.ContainsRune(
+    allowed,
+    ch,
+  )) {
+    return Err(errors.New(
+      "agent names must contain only lowercase ASCII letters, digits, hyphens, or underscores",
+    ))
+  }
+  Ok(())
+}
+
+pub fn reporting_url(address: string) -> Result<string, error> {
+  let invalid_url = errors.New(
+    "agent.server_url must be an HTTPS origin or a loopback HTTP origin",
+  )
+  let mut parsed = url.Parse(address).map_err(|_| invalid_url)?
+  if parsed.Hostname().is_empty() || strings.HasSuffix(parsed.Host, ":") || parsed.User.is_some() || strings.ContainsAny(
+    address,
+    "?#",
+  ) || (parsed.Path != "" && parsed.Path != "/") || parsed.RawPath != "" {
+    return Err(invalid_url)
+  }
+  let loopback = netip
+    .ParseAddr(parsed.Hostname())
+    .map_or(false, |ip| ip.Zone() == "" && ip.Unmap().IsLoopback())
+  if parsed.Scheme != "https" && !(parsed.Scheme == "http" && loopback) {
+    return Err(invalid_url)
+  }
+  let port = parsed.Port()
+  if !port.is_empty() && strconv
+    .ParseUint(port, 10, 16)
+    .map_or(true, |n| n == 0) {
+    return Err(errors.New("agent.server_url port must be between 1 and 65535"))
+  }
+  parsed.Path = HEARTBEAT_PATH
+  Ok(parsed.String())
 }

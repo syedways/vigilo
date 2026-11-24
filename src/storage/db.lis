@@ -79,11 +79,20 @@ fn migrate(db: mut Ref<sql.DB>) -> Result<(), error> {
   tx.QueryRow("PRAGMA user_version").Scan(&version)?
   match version {
     0 => create_history_schema(tx)?,
-    1 => (),
+    1 | 2 => (),
     _ if version < 0 => {
       return Err(errors.New("invalid database schema version"))
     },
     _ => return Err(errors.New("database schema is newer than this binary")),
+  }
+  if version < 2 {
+    let _ = tx.Exec(
+      "CREATE TABLE agent_contacts (
+      name TEXT PRIMARY KEY,
+      contacted_at_ns INTEGER NOT NULL
+    )",
+    )?
+    let _ = tx.Exec("PRAGMA user_version = 2")?
   }
   tx.Commit()
 }
@@ -112,6 +121,5 @@ fn create_history_schema(tx: mut Ref<sql.Tx>) -> Result<(), error> {
   let _ = tx.Exec(
     "CREATE INDEX check_results_retention ON check_results(checked_at_ms)",
   )?
-  let _ = tx.Exec("PRAGMA user_version = 1")?
   Ok(())
 }

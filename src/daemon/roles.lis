@@ -1,0 +1,60 @@
+import "go:context"
+import "go:errors"
+import "go:os"
+import "go:os/signal"
+import "go:syscall"
+
+import "agent"
+import "config"
+import "server"
+
+fn server_command() -> Command {
+  role_command("server", "Start the Vigilo server", |ctx, loaded, path, creds| {
+    let settings = match loaded {
+      config.Config.Server(settings) |
+      config.Config.Both { server: settings, .. } => settings,
+      config.Config.Agent(_) => return Err(errors.New(
+        f"validate config {path}: requires a server section",
+      )),
+    }
+    server.run(ctx, settings, creds)
+  })
+}
+
+fn agent_command() -> Command {
+  role_command("agent", "Start the Vigilo agent", |ctx, loaded, path, creds| {
+    let settings = match loaded {
+      config.Config.Agent(settings) | config.Config.Both { agent: settings, .. } => settings,
+      config.Config.Server(_) => return Err(errors.New(
+        f"validate config {path}: requires an agent section",
+      )),
+    }
+    agent.run(ctx, settings, creds)
+  })
+}
+
+fn role_command(
+  name: string,
+  desc: string,
+  start: fn(context.Context, config.Config, string, string) -> Result<(), error>,
+) -> Command {
+  Command {
+    name,
+    desc,
+    action: Action.Run {
+      args_usage: "[path]",
+      details: config_lookup_help(),
+      handler: |args| {
+        let path = config_path(args)?
+        let loaded = config.load(path)?
+        let (ctx, stop) = signal.NotifyContext(
+          context.Background(),
+          os.Interrupt,
+          syscall.SIGTERM,
+        )
+        defer stop()
+        start(ctx, loaded, path, os.Getenv("CREDENTIALS_DIRECTORY"))
+      },
+    },
+  }
+}

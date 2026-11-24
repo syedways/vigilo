@@ -5,15 +5,12 @@ tableOfContents:
   maxHeadingLevel: 4
 ---
 
-## Choose a setup
+## Configure the server
 
-Copy one of the examples into `/etc/vigilo/vigilo.toml`. Use lowercase keys.
+Use lowercase keys in `/etc/vigilo/vigilo.toml`. Choose how the server receives
+its admin password and whether it serves HTTPS directly.
 
-### Server only
-
-Use a password file or a systemd credential to supply the admin password.
-
-#### Password file
+### Password file
 
 ```toml title="/etc/vigilo/vigilo.toml"
 [server.admin]
@@ -23,7 +20,7 @@ password_file = "/run/secrets/vigilo-admin"
 
 Save the password to `/run/secrets/vigilo-admin` and give the server read access.
 
-#### systemd credential
+### systemd credential
 
 ```toml title="/etc/vigilo/vigilo.toml"
 [server.admin]
@@ -41,7 +38,7 @@ LoadCredential=admin-password:/run/secrets/vigilo-admin
 
 The credential name `admin-password` matches `password_credential` in the TOML.
 
-#### HTTPS directly from Vigilo
+### HTTPS directly from Vigilo
 
 ```toml title="/etc/vigilo/vigilo.toml"
 [server]
@@ -62,7 +59,7 @@ restrict access to the private key. Restart Vigilo to load a renewed
 certificate. By default, Vigilo listens on loopback. Set `listen` explicitly
 to serve HTTPS on another interface.
 
-#### Without built-in authentication
+### Without built-in authentication
 
 ```toml title="/etc/vigilo/vigilo.toml"
 [server]
@@ -75,31 +72,11 @@ authentication at the proxy and set the upstream `Host` header to the
 loopback address, such as `127.0.0.1:8080`. Vigilo accepts only `localhost`
 and loopback IPs in the `Host` header when built-in authentication is disabled.
 
-### Agent only
+### Server storage
 
-```toml title="/etc/vigilo/vigilo.toml"
-[agent]
-name = "web-01"
-```
-
-### Server and agent
-
-```toml title="/etc/vigilo/vigilo.toml"
-[server]
-listen = "127.0.0.1:8080"
-
-[server.storage]
-path = "/var/lib/vigilo/vigilo.db"
-
-[server.admin]
-username = "admin"
-password_credential = "admin-password"
-
-[agent]
-name = "web-01"
-```
-
-Use the [systemd drop-in above](#systemd-credential) to supply `admin-password`.
+If you configure HTTP checks or register agents, create the parent directory
+for `server.storage.path` and restrict read and write access to the server's
+service user.
 
 ## Validate the file
 
@@ -114,11 +91,10 @@ VIGILO_CONFIG_PATH=/path/to/vigilo.toml vigilo config check
 vigilo config check ./vigilo.toml
 ```
 
-The command validates every section without opening the password source
-or TLS files.
-Start the server with `vigilo server`, which uses the same config path
-precedence. At startup, Vigilo checks the password and loads the configured
-TLS pair before opening the listener.
+The command validates every section without reading secrets, opening TLS files,
+or creating a database. Start the roles with `vigilo server [path]` and
+`vigilo agent [path]`. Both use the same config lookup order and load their
+credentials at startup.
 
 ## Monitor an HTTP endpoint
 
@@ -131,10 +107,6 @@ url = "https://example.com/"
 interval = "1m"
 ```
 
-The database opens when at least one check is configured. Create the parent
-directory for `server.storage.path` and give the Vigilo user read and write access
-to it. Keep that directory private to the service user.
-
 Open Vigilo in your browser and select **Checks** to see each check's latest
 result. Select a check to see its recent history.
 
@@ -142,6 +114,49 @@ Vigilo records `up` for HTTP 2xx, `down` for other HTTP statuses, `timeout` when
 the five-second deadline expires, and `error` for other request failures.
 Checks do not follow redirects. Results older than seven days are removed as
 new results are recorded.
+
+## Set up agent reporting
+
+Generate a separate token for each machine.
+
+```sh
+umask 077
+openssl rand -hex 32 > vigilo-web-01
+```
+
+Install the token at `/run/secrets/vigilo-web-01` on the server and its assigned
+machine. Give each service user read access. Add the registration to the server
+configuration.
+
+```toml
+[server.agents.web-01]
+token_file = "/run/secrets/vigilo-web-01"
+```
+
+Use the same machine name and token on the agent.
+
+```toml
+[agent]
+name = "web-01"
+server_url = "https://vigilo.example.com"
+token_file = "/run/secrets/vigilo-web-01"
+```
+
+For a remote server, use its HTTPS origin. The agent uses the machine's system
+trust store. On a trusted host running both roles, you can keep both tables in
+one file and use `http://127.0.0.1:8080` for the default loopback listener.
+Loopback HTTP trusts the local process listening on that port.
+
+For systemd credentials, replace both `token_file` entries with
+`token_credential = "web-01-token"` and set
+`LoadCredential=web-01-token:/run/secrets/vigilo-web-01` in both units.
+
+Restart the server after adding a registration. Start the agent once the server
+has loaded the registration, and restart both after rotating the token.
+The agent reports immediately and every 30 seconds, with a five-second timeout.
+Open **Agents** to see the last contact in UTC. A machine is **Never seen** until
+its first report, **Online** for 90 seconds after its latest report, and
+**Offline** after that.
 
 ## All settings
 
@@ -153,9 +168,11 @@ new results are recorded.
 | `server.auth` | `"password"` | `"password"` for one configured admin, or `"none"` to disable built-in authentication |
 | `server.tls.certificate_file` | None | Absolute path to the PEM certificate chain. Required if `server.tls` is present. |
 | `server.tls.key_file` | None | Absolute path to the matching PEM private key. Required if `server.tls` is present. |
-| `server.storage.path` | `"/var/lib/vigilo/vigilo.db"` | Absolute SQLite database path for check history. |
+| `server.storage.path` | `"/var/lib/vigilo/vigilo.db"` | Absolute SQLite database path for check history and agent contacts. |
 | `server.checks.<name>.url` | Required for each check | HTTP or HTTPS URL without credentials or a fragment. Names use lowercase ASCII letters, digits, hyphens, or underscores. |
 | `server.checks.<name>.interval` | `"1m"` | A duration of at least one second, such as `"30s"` or `"5m"`. |
+| `server.agents.<name>.token_file` | None | Absolute path to the machine's token file. Choose one token source per registration. |
+| `server.agents.<name>.token_credential` | None | systemd credential name for the machine's token. |
 | `server.admin.username` | Required in password mode | Username on a single line without a colon |
 | `server.admin.password_file` | None | Absolute password file path |
 | `server.admin.password_credential` | None | Credential name containing ASCII letters, digits, dots, underscores, or hyphens. `.` and `..` are invalid. |
@@ -173,4 +190,11 @@ in front of its loopback listener.
 
 | Key | Default | Accepted values |
 | --- | --- | --- |
-| `agent.name` | Required | Machine name on a single line |
+| `agent.name` | Required | Matches the server registration. Names used for reporting contain 1 to 1,013 lowercase ASCII letters, digits, hyphens, or underscores. |
+| `agent.server_url` | None | HTTPS origin or HTTP origin with a literal loopback IP. |
+| `agent.token_file` | None | Absolute path to the machine's token file. |
+| `agent.token_credential` | None | systemd credential name for the machine's token. |
+
+To start an agent, supply `server_url` and choose one token source. A name-only
+section is valid for config checks. Each token is 64 hexadecimal characters
+with an optional final newline (LF or CRLF).

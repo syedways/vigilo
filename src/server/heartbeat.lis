@@ -1,0 +1,168 @@
+import "go:context"
+import "go:encoding/json"
+import "go:errors"
+import "go:io"
+import "go:net/http"
+import "go:slices"
+import "go:strings"
+import "go:sync"
+import "go:time"
+
+import "agent"
+import "secret"
+
+const HEARTBEAT_WRITE_COOLDOWN: time.Duration = time.Second
+
+struct Agents {
+  names: Slice<string>,
+  tokens: Map<Array<byte, 32>, string>,
+  record: fn(context.Context, string) -> Result<(), error>,
+  contacts: fn(context.Context) -> Result<Map<string, time.Time>, error>,
+}
+
+fn load_tokens(
+  sources: Map<string, secret.Source>,
+  credentials_dir: string,
+) -> Result<(Slice<string>, Map<Array<byte, 32>, string>), error> {
+  let mut names = Slice.new<string>()
+  let mut tokens = Map.new<Array<byte, 32>, string>()
+  for (name, source) in sources {
+    let token = secret
+      .read_token(source, credentials_dir)
+      .wrap_err(f"load token for {name}")?
+    let digest = secret.digest_token(token)
+    if tokens.get(digest).is_some() {
+      return Err(errors.New("agent registrations must use distinct tokens"))
+    }
+    tokens[digest] = name
+    names = names.append(name)
+  }
+  slices.Sort(names)
+  Ok((names, tokens))
+}
+
+fn coalesce_records(
+  record: fn(context.Context, string) -> Result<(), error>,
+  now: fn() -> time.Time,
+) -> fn(context.Context, string) -> Result<(), error> {
+  let mut mu = sync.Mutex { .. }
+  let mut last = Map.new<string, time.Time>()
+  let mut in_flight = Map.new<string, bool>()
+  |ctx, name| {
+    let started = now()
+    mu.Lock()
+    let busy = in_flight.get(name).unwrap_or(false)
+    let recent = last
+      .get(name)
+      .map_or(false, |prev| {
+        let age = started.Sub(prev)
+        age >= 0 && age < HEARTBEAT_WRITE_COOLDOWN
+      })
+    let should_write = !(busy || recent)
+    if should_write { in_flight[name] = true }
+    mu.Unlock()
+    if !should_write { return Ok(()) }
+
+    let mut recorded = false
+    defer {
+      mu.Lock()
+      in_flight.delete(name)
+      if recorded { last[name] = now() }
+      mu.Unlock()
+    }
+    record(ctx, name)?
+    recorded = true
+    Ok(())
+  }
+}
+
+fn serve_heartbeat(
+  agents: Option<Agents>,
+  response: http.ResponseWriter,
+  request: mut Ref<http.Request>,
+) {
+  if request.Method != "POST" {
+    response.Header().Set("Allow", "POST")
+    http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+  let Some((configured, expected_name)) = authenticate_heartbeat(
+    agents,
+    request,
+  ) else {
+    reject_heartbeat(response)
+    return
+  }
+  let Some(body) = request.Body else {
+    http.Error(response, "invalid heartbeat", http.StatusBadRequest)
+    return
+  }
+  let limited = http.MaxBytesReader(
+    response,
+    body,
+    agent.MAX_HEARTBEAT_BYTES as int64,
+  )
+  let contents = match io.ReadAll(limited) {
+    Partial.Ok(contents) => contents,
+    Partial.Err(err) | Partial.Both(_, err) => {
+      if assert_type<Ref<http.MaxBytesError>>(err).is_some() {
+        http.Error(
+          response,
+          "heartbeat too large",
+          http.StatusRequestEntityTooLarge,
+        )
+      } else {
+        http.Error(response, "invalid heartbeat", http.StatusBadRequest)
+      }
+      return
+    },
+  }
+  let mut payload = Map.new<string, string>()
+  let result = json.Unmarshal(contents, &payload)
+  let name = payload.get("name").unwrap_or("")
+  if result.is_err() || payload.length() != 1 || agent
+    .validate_name(name)
+    .is_err() {
+    http.Error(response, "invalid heartbeat", http.StatusBadRequest)
+    return
+  }
+  if name != expected_name {
+    reject_heartbeat(response)
+    return
+  }
+  if (configured.record)(request.Context(), name).is_err() {
+    http.Error(
+      response,
+      "heartbeat storage unavailable",
+      http.StatusServiceUnavailable,
+    )
+    return
+  }
+  response.WriteHeader(http.StatusNoContent)
+}
+
+fn authenticate_heartbeat(
+  agents: Option<Agents>,
+  request: Ref<http.Request>,
+) -> Option<(Agents, string)> {
+  let Some(configured) = agents else {
+    return None
+  }
+  let Some(headers) = request.Header else {
+    return None
+  }
+  let (scheme, token, _) = strings.Cut(headers.Get("Authorization"), " ")
+  if !strings.EqualFold(scheme, "Bearer") { return None }
+  let Ok(decoded) = secret.decode_token(token) else {
+    return None
+  }
+  let Some(name) = configured.tokens.get(secret.digest_token(decoded)) else {
+    return None
+  }
+  Some((configured, name))
+}
+
+fn reject_heartbeat(response: http.ResponseWriter) {
+  response.Header().Set("WWW-Authenticate", "Bearer")
+  http.Error(response, "unauthorized", http.StatusUnauthorized)
+}
