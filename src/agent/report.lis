@@ -1,0 +1,96 @@
+import "go:context"
+import "go:encoding/hex"
+import "go:errors"
+import "go:fmt"
+import "go:net/http"
+import "go:os"
+import "go:strings"
+import "go:time"
+
+import "secret"
+
+pub fn run(
+  ctx: context.Context,
+  settings: Config,
+  credentials_dir: string,
+) -> Result<(), error> {
+  let Some(reporting) = settings.reporting else {
+    return Err(errors.New("agent requires server_url and a token source"))
+  }
+  validate_name(settings.machine_name).wrap_err("agent.name")?
+  let origin = strings
+    .CutSuffix(reporting.endpoint, HEARTBEAT_PATH)
+    .ok_or_else(|| errors.New(
+      "agent.server_url must be an HTTPS origin or a loopback HTTP origin",
+    ))?
+  let endpoint = reporting_url(origin)?
+  let token = hex.EncodeToString(
+    secret.read_token(reporting.token, credentials_dir)?,
+  )
+  let mut transport = http.Transport {
+    DisableKeepAlives: true,
+    ForceAttemptHTTP2: true,
+    ..,
+  }
+  let client = http.Client {
+    Transport: Some(&transport),
+    Timeout: 5 * time.Second,
+    CheckRedirect: Some(|_, _| Err(http.ErrUseLastResponse)),
+    ..,
+  }
+  let ticker = time.NewTicker(30 * time.Second)
+  defer ticker.Stop()
+  let body = f"{{\"name\":\"{settings.machine_name}\"}}"
+  let mut ready = false
+  loop {
+    let result = report(ctx, &client, endpoint, token, body)
+    if ctx.Err().is_some() { return Ok(()) }
+    match result {
+      Ok(()) if !ready => {
+        fmt.Println("agent: heartbeat acknowledged")
+        ready = true
+      },
+      Ok(()) => (),
+      Err(err) => {
+        let _ = fmt.Fprintln(os.Stderr, f"agent: {err}")
+      },
+    }
+    select {
+      match ctx.Done().receive() {
+        Some(_) => return Ok(()),
+        None => return Ok(()),
+      },
+      match ticker.C.receive() {
+        Some(_) => (),
+        None => return Ok(()),
+      },
+    }
+  }
+}
+
+fn report(
+  ctx: context.Context,
+  client: Ref<http.Client>,
+  endpoint: string,
+  token: string,
+  body: string,
+) -> Result<(), error> {
+  let mut request = http
+    .NewRequestWithContext(ctx, "POST", endpoint, Some(strings.NewReader(body)))
+    .map_err(|_| errors.New("could not create heartbeat request"))?
+  let Some(request_headers) = request.Header else {
+    return Err(errors.New("heartbeat request has no headers"))
+  }
+  let mut headers = request_headers
+  headers.Set("Content-Type", "application/json")
+  headers.Set("Authorization", f"Bearer {token}")
+  let response = client
+    .Do(request)
+    .map_err(|err| errors.Unwrap(err).unwrap_or(err))
+    .wrap_err("heartbeat request failed")?
+  if let Some(body) = response.Body { let _ = body.Close() }
+  if response.StatusCode != http.StatusNoContent {
+    return Err(errors.New(f"heartbeat returned HTTP {response.StatusCode}"))
+  }
+  Ok(())
+}

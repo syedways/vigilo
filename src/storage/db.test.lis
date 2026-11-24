@@ -33,7 +33,7 @@ fn disk_database_configures_every_connection() -> Result<(), error> {
       ("foreign_keys", 1),
       ("busy_timeout", 5000),
       ("wal_autocheckpoint", 1000),
-      ("user_version", 1),
+      ("user_version", 2),
     ] {
       let mut actual = 0
       db.QueryRow(f"PRAGMA {pragma}").Scan(&actual)?
@@ -51,7 +51,13 @@ fn migrations_are_idempotent_and_preserve_data() -> Result<(), error> {
     let _ = os.RemoveAll(dir)
   }
   let path = filepath.Join(dir, "state.db")
-  let mut db = open(path)?
+  prepare_database(path)?
+  let mut db = sql.Open("sqlite", path)?
+  defer db.Close()
+  let mut tx = db.Begin()?
+  create_history_schema(tx)?
+  let _ = tx.Exec("PRAGMA user_version = 1")?
+  tx.Commit()?
   let now = time.Now().UnixMilli()
   record(
     db,
@@ -72,6 +78,22 @@ fn migrations_are_idempotent_and_preserve_data() -> Result<(), error> {
   let assert [sample] = history
   assert sample.checked_at_ms == now
   assert sample.status_code == 200
+  let ctx = context.Background()
+  let first = time.Unix(10, 0)
+  let later = first.Add(time.Nanosecond)
+  record_contact(reopened, ctx, "web", || later)?
+  record_contact(reopened, ctx, "web", || first)?
+  let latest = contacts(reopened, ctx)?
+  let assert Some(contact) = latest.get("web")
+  assert contact.Equal(first)
+  record_contact(reopened, ctx, "worker", || later)?
+  prune_contacts(reopened, ctx, ["web"])?
+  let pruned = contacts(reopened, ctx)?
+  assert pruned.get("web").is_some()
+  assert pruned.get("worker").is_none()
+  prune_contacts(reopened, ctx, [])?
+  let remaining = contacts(reopened, ctx)?
+  assert remaining.is_empty()
   Ok(())
 }
 

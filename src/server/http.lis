@@ -17,6 +17,7 @@ pub fn run(
   credentials_dir: string,
 ) -> Result<(), error> {
   validate_endpoint(settings)?
+  let (names, tokens) = load_tokens(settings.agents, credentials_dir)?
   let auth = load_auth(settings.auth, credentials_dir)?
   let tls_settings = match settings.tls {
     Some(files) => {
@@ -41,12 +42,15 @@ pub fn run(
   })
   let mut handler = new_handler(auth)?
   let checks = settings.checks
-  if checks.is_empty() { return serve_http(ctx, listener, handler, scheme) }
+  if checks.is_empty() && names.is_empty() {
+    return serve_http(ctx, listener, handler, scheme)
+  }
 
   let mut db = storage
     .open(settings.storage_path)
-    .wrap_err("open check history")?
+    .wrap_err("open server database")?
   defer db.Close()
+  storage.prune_contacts(db, ctx, names).wrap_err("prune agent contacts")?
   let (checks_ctx, stop_checks) = context.WithCancel(ctx)
   let finished = Channel.buffered<()>(checks.length())
   defer {
@@ -62,17 +66,37 @@ pub fn run(
       let _ = finished.send(())
     }
   }
-  handler.history = Some(
-    History {
-      recent: |request_ctx, name, limit| storage.recent(
-        db,
-        request_ctx,
-        name,
-        limit,
-      ),
-      checks,
-    },
-  )
+  if !checks.is_empty() {
+    handler.history = Some(
+      History {
+        recent: |request_ctx, name, limit| storage.recent(
+          db,
+          request_ctx,
+          name,
+          limit,
+        ),
+        checks,
+      },
+    )
+  }
+  if !names.is_empty() {
+    handler.agents = Some(
+      Agents {
+        names,
+        tokens,
+        record: coalesce_records(
+          |request_ctx, name| storage.record_contact(
+            db,
+            request_ctx,
+            name,
+            time.Now,
+          ),
+          time.Now,
+        ),
+        contacts: |request_ctx| storage.contacts(db, request_ctx),
+      },
+    )
+  }
   serve_http(ctx, listener, handler, scheme)
 }
 
@@ -134,6 +158,8 @@ struct Handler {
   overview: Overview,
   checks_page: Ref<template.Template>,
   history: Option<History>,
+  agents_page: Ref<template.Template>,
+  agents: Option<Agents>,
 }
 
 struct History {
@@ -144,7 +170,17 @@ struct History {
 fn new_handler(auth: Auth) -> Result<Handler, error> {
   let overview = new_overview(time.Now())?
   let checks_page = parse_page(CHECKS_CONTENT)?
-  Ok(Handler { auth, overview, checks_page, history: None })
+  let agents_page = parse_page(AGENTS_CONTENT)?
+  Ok(
+    Handler {
+      auth,
+      overview,
+      checks_page,
+      history: None,
+      agents_page,
+      agents: None,
+    },
+  )
 }
 
 impl Handler {
@@ -161,6 +197,10 @@ impl Handler {
     }
     let Some(url) = request.URL else {
       http.NotFound(response, request)
+      return
+    }
+    if url.Path == "/api/agents/heartbeat" {
+      serve_heartbeat(self.agents, response, request)
       return
     }
     if url.Path != "/healthz" && !permits(self.auth, request) {
@@ -180,6 +220,11 @@ impl Handler {
         if allow_get(response, request.Method) {
           let name = url.Query().Get("check")
           serve_checks(self.checks_page, self.history, response, request, name)
+        }
+      },
+      "/agents" => {
+        if allow_get(response, request.Method) {
+          serve_agents(self.agents_page, self.agents, response, request)
         }
       },
       "/healthz" => {

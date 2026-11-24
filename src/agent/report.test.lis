@@ -1,0 +1,59 @@
+import "go:context"
+import "go:net"
+import "go:net/http"
+import "go:strings"
+import "go:time"
+
+import "secret"
+
+#[test]
+fn run_validates_machine_name_and_endpoint() {
+  let ctx = context.Background()
+  let token = secret.Source.File("/missing/token")
+  let bad_name = Config {
+    machine_name: "bad\"name",
+    reporting: Some(
+      Reporting { endpoint: "https://example.com/api/agents/heartbeat", token },
+    ),
+  }
+  let assert Err(name_err) = run(ctx, bad_name, "")
+  assert name_err.Error().contains("agent.name")
+
+  let bad_endpoint = Config {
+    machine_name: "web",
+    reporting: Some(
+      Reporting { endpoint: "http://example.com/api/agents/heartbeat", token },
+    ),
+  }
+  let assert Err(url_err) = run(ctx, bad_endpoint, "")
+  assert url_err.Error().contains("HTTPS origin or a loopback HTTP origin")
+}
+
+#[test]
+fn report_preserves_transport_error_without_leaking_token() -> Result<(), error> {
+  let listener = net.Listen("tcp", "127.0.0.1:0")?
+  let Some(addr) = listener.Addr() else {
+    return Ok(())
+  }
+  let address = addr.String()
+  listener.Close()?
+
+  let mut transport = http.Transport { DisableKeepAlives: true, .. }
+  let client = http.Client {
+    Transport: Some(&transport),
+    Timeout: time.Second,
+    ..,
+  }
+  let sample = strings.Repeat("a", 64)
+  let assert Err(err) = report(
+    context.Background(),
+    &client,
+    f"http://{address}/api/agents/heartbeat",
+    sample,
+    "{\"name\":\"web\"}",
+  )
+  let message = err.Error()
+  assert message.contains("heartbeat request failed:")
+  assert !message.contains(sample)
+  Ok(())
+}

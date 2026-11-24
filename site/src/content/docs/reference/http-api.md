@@ -23,3 +23,22 @@ mode.
 
 A configured check with no stored results returns `[]`. An unknown check returns
 `404`. Missing or invalid credentials in password mode return `401`.
+
+## Agent heartbeat
+
+`POST /api/agents/heartbeat` accepts a JSON body of up to 1 KiB with the
+configured machine name, such as `{"name":"web-01"}`. Send the machine's token
+in the `Authorization: Bearer <token>` header. The server records its own
+timestamp when it accepts the heartbeat.
+
+| Status | Meaning |
+| --- | --- |
+| `204` | Heartbeat recorded. |
+| `400` | Invalid JSON or heartbeat payload. |
+| `401` | Unknown machine, missing or invalid token, or a token assigned to another machine. |
+| `405` | Request method other than `POST`. |
+| `413` | Request body exceeds 1 KiB. |
+| `503` | The server could not write the heartbeat to SQLite. |
+
+`GET /agents` shows configured machines and their last contact. It uses the
+same admin authentication as the overview and checks pages.

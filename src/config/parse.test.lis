@@ -2,6 +2,7 @@ import "go:os"
 import "go:path/filepath"
 import "go:strings"
 
+import secrets "secret"
 import "server"
 
 fn minimal_server() -> string {
@@ -16,7 +17,7 @@ fn server_defaults_and_secret_source() {
   assert settings.storage_path == "/var/lib/vigilo/vigilo.db"
   let assert server.AuthConfig.Password { username, source } = settings.auth
   assert username == "admin"
-  assert source == server.SecretSource.File("/missing/password")
+  assert source == secrets.Source.File("/missing/password")
 }
 
 #[test]
@@ -34,7 +35,7 @@ password_credential = \"admin-password.1\"
   assert settings.storage_path == "/srv/vigilo/state.db"
   let assert server.AuthConfig.Password { username, source } = settings.auth
   assert username == "operator"
-  assert source == server.SecretSource.Credential("admin-password.1")
+  assert source == secrets.Source.Credential("admin-password.1")
 }
 
 #[test]
@@ -60,7 +61,7 @@ fn config_sections_support_one_or_both_roles() {
   assert shared_server.storage_path == "/srv/vigilo/state.db"
   let assert server.AuthConfig.Password { username, source } = shared_server.auth
   assert username == "admin"
-  assert source == server.SecretSource.Credential("admin-password")
+  assert source == secrets.Source.Credential("admin-password")
   assert agent_only.machine_name == "web-01"
   assert shared_agent.machine_name == agent_only.machine_name
 }
@@ -293,4 +294,67 @@ fn loading_config_never_reads_secrets_or_creates_state() -> Result<(), error> {
   assert preserved_contents == contents
   assert load(filepath.Join(dir, "missing.toml")).is_err()
   Ok(())
+}
+
+#[test]
+fn reporting_config_checks_names_urls_and_token_selectors_without_reading_files() {
+  let assert Ok(Config.Both { server: settings, agent: machine }) = parse(
+    "[server]
+    auth = \"none\"
+    [server.agents.web_01]
+    token_file = \"/missing/token\"
+    [agent]
+    name = \"web_01\"
+    server_url = \"http://[::1]:8080/\"
+    token_credential = \"machine-token\"".bytes(),
+  )
+  let assert Some(reporting) = machine.reporting
+  assert reporting.endpoint == "http://[::1]:8080/api/agents/heartbeat"
+  assert settings.agents.get("web_01") ==
+  Some(secrets.Source.File("/missing/token"))
+  let scoped_origin = "[agent]\nname = 'web'\nserver_url = 'https://[fe80::1%25eth0]:65535/'\ntoken_file = '/missing/token'"
+  let assert Ok(Config.Agent(scoped)) = parse(scoped_origin.bytes())
+  let assert Some(scoped_reporting) = scoped.reporting
+  assert scoped_reporting.endpoint ==
+  "https://[fe80::1%25eth0]:65535/api/agents/heartbeat"
+  for address in [
+    "http://localhost",
+    "http://192.0.2.1",
+    "https://user@example.com",
+    "https://example.com/?query",
+    "https://example.com/other",
+    "https://example.com:0",
+    "https://example.com:65536",
+    "https://example.com:",
+    "http://127.0.0.1:",
+    "http://[::1]:",
+  ] {
+    let config = f"[agent]\nname = 'web'\nserver_url = '{address}'\ntoken_file = '/missing/token'"
+    assert parse(config.bytes()).is_err()
+  }
+  for token_fields in [
+    "",
+    "token_file = ''",
+    "token_file = 'relative'",
+    "token_credential = '..'",
+    "token_file = '/missing/token'\ntoken_credential = 'token'",
+  ] {
+    let client = f"[agent]\nname = 'web'\nserver_url = 'https://example.com'\n{token_fields}"
+    let registration = f"[server]\nauth = 'none'\n[server.agents.web]\n{token_fields}"
+    assert parse(client.bytes()).is_err()
+    assert parse(registration.bytes()).is_err()
+  }
+  let invalid_name = "[server]\nauth = 'none'\n[server.agents.'web.01']\ntoken_credential = 'token'"
+  assert parse(invalid_name.bytes()).is_err()
+}
+
+#[test]
+fn reporting_names_fit_the_heartbeat_body() {
+  for length in [1013, 1014] {
+    let name = strings.Repeat("a", length)
+    let client = f"[agent]\nname = '{name}'\nserver_url = 'https://example.com'\ntoken_file = '/missing/token'"
+    let registration = f"[server]\nauth = 'none'\n[server.agents.{name}]\ntoken_credential = 'token'"
+    assert parse(client.bytes()).is_ok() == (length == 1013)
+    assert parse(registration.bytes()).is_ok() == (length == 1013)
+  }
 }
